@@ -572,6 +572,12 @@ fn search_file_with_metadata(path: &Path, re: &Regex) -> Option<Session> {
 
     let project_exists = Path::new(&cwd).exists();
 
+    // Same rationale as discovery.rs: last write beats first-message time.
+    let timestamp = fs::metadata(path)
+        .and_then(|m| m.modified())
+        .map(DateTime::<Utc>::from)
+        .unwrap_or(timestamp);
+
     Some(Session {
         id: session_id,
         project_path: cwd.clone(),
@@ -579,6 +585,7 @@ fn search_file_with_metadata(path: &Path, re: &Regex) -> Option<Session> {
         git_branch: entry.git_branch,
         timestamp,
         first_message,
+        last_assistant_line: String::new(),
         cwd,
         project_exists,
     })

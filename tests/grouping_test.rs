@@ -17,6 +17,7 @@ fn make_session(id: &str, project: &str, hours_ago: i64, message: &str) -> Sessi
         git_branch: None,
         timestamp: ts,
         first_message: message.to_string(),
+        last_assistant_line: String::new(),
         cwd: format!("/test/{}", project),
         project_exists: true,
     }

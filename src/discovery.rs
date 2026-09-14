@@ -1,7 +1,7 @@
 // Session discovery: scanning ~/.claude/projects/ for session JSONL files
 
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -60,19 +60,17 @@ pub fn discover_sessions(claude_home: &Path) -> Vec<Session> {
     sessions
 }
 
-/// Parse a single JSONL session file and extract the first user message.
+/// Parse a single JSONL session file and extract the most recent user message.
 fn parse_session_file(path: &Path) -> Option<Session> {
     let session_id = path.file_stem()?.to_str()?.to_string();
 
     let file = fs::File::open(path).ok()?;
     let reader = BufReader::new(file);
 
-    // Track metadata from the first user entry (for cwd, branch, timestamp)
-    // but keep scanning for a non-meta message to display
+    // cwd/branch never change within a session, so the first user entry is
+    // enough for metadata -- stop as soon as it's found.
     let mut cwd = String::new();
     let mut git_branch: Option<String> = None;
-    let mut timestamp: DateTime<Utc> = Utc::now();
-    let mut first_message = String::new();
     let mut found_metadata = false;
 
     for line in reader.lines().take(50) {
@@ -92,38 +90,23 @@ fn parse_session_file(path: &Path) -> Option<Session> {
             continue;
         }
 
-        // Grab metadata from the first user entry
-        if !found_metadata {
-            cwd = entry.cwd.clone().unwrap_or_default();
-            git_branch = entry.git_branch.clone();
-            timestamp = entry
-                .timestamp
-                .as_deref()
-                .and_then(|t| t.parse().ok())
-                .unwrap_or_else(Utc::now);
-            found_metadata = true;
-        }
-
-        // Extract and clean message text
-        let raw_text = entry.message.map(|m| m.content.text()).unwrap_or_default();
-        if is_meta_message(&raw_text) {
-            continue;
-        }
-
-        let cleaned = clean_message(&raw_text);
-        first_message = cleaned
-            .lines()
-            .next()
-            .unwrap_or("")
-            .chars()
-            .take(200)
-            .collect();
+        cwd = entry.cwd.clone().unwrap_or_default();
+        git_branch = entry.git_branch.clone();
+        found_metadata = true;
         break;
     }
 
     if !found_metadata {
         return None;
     }
+
+    // The messages shown in the list are the most recent ones, not the
+    // first -- read backwards from the end of the file instead of scanning
+    // it whole, since a session's JSONL can run into the hundreds of MB.
+    let (last_user, last_assistant) = read_tail_previews(path);
+    let first_message = last_user.unwrap_or_default();
+    let last_assistant_line = last_assistant.unwrap_or_default();
+    let timestamp: DateTime<Utc> = Utc::now();
 
     let project_name = Path::new(&cwd)
         .file_name()
@@ -133,6 +116,14 @@ fn parse_session_file(path: &Path) -> Option<Session> {
 
     let project_exists = Path::new(&cwd).exists();
 
+    // Sort/display by last write to the file, not the first message's
+    // timestamp -- otherwise a session that started hours ago but is still
+    // being actively written never bubbles to the top of the list.
+    let timestamp = fs::metadata(path)
+        .and_then(|m| m.modified())
+        .map(DateTime::<Utc>::from)
+        .unwrap_or(timestamp);
+
     Some(Session {
         id: session_id,
         project_path: cwd.clone(),
@@ -140,9 +131,103 @@ fn parse_session_file(path: &Path) -> Option<Session> {
         git_branch,
         timestamp,
         first_message,
+        last_assistant_line,
         cwd,
         project_exists,
     })
+}
+
+/// Find the most recent non-meta user message and the most recent assistant
+/// text reply's last line, reading backwards from the end of the file
+/// instead of scanning it whole (doubling the read window until both turn
+/// up, capped, so a pathological file can't stall discovery).
+fn read_tail_previews(path: &Path) -> (Option<String>, Option<String>) {
+    let mut file = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return (None, None),
+    };
+    let file_len = match file.metadata() {
+        Ok(m) => m.len(),
+        Err(_) => return (None, None),
+    };
+
+    let mut window: u64 = 64 * 1024;
+    let max_window: u64 = 8 * 1024 * 1024;
+    let mut last_user: Option<String> = None;
+    let mut last_assistant: Option<String> = None;
+
+    loop {
+        let start = file_len.saturating_sub(window);
+        if file.seek(SeekFrom::Start(start)).is_err() {
+            return (last_user, last_assistant);
+        }
+        let mut buf = Vec::with_capacity((file_len - start) as usize);
+        if file
+            .by_ref()
+            .take(file_len - start)
+            .read_to_end(&mut buf)
+            .is_err()
+        {
+            return (last_user, last_assistant);
+        }
+        let text = String::from_utf8_lossy(&buf);
+
+        // The window boundary likely lands mid-line; drop that partial first
+        // line unless we're already reading from the true start of the file.
+        let lines: Vec<&str> = if start == 0 {
+            text.lines().collect()
+        } else {
+            text.lines().skip(1).collect()
+        };
+
+        for line in lines.iter().rev() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let entry: SessionFileEntry = match serde_json::from_str(line) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let raw_text = entry.message.map(|m| m.content.text()).unwrap_or_default();
+            if is_meta_message(&raw_text) {
+                continue;
+            }
+
+            match entry.entry_type.as_str() {
+                "user" if last_user.is_none() => {
+                    let msg: String = clean_message(&raw_text).chars().take(200).collect();
+                    if !msg.is_empty() {
+                        last_user = Some(msg);
+                    }
+                }
+                "assistant" if last_assistant.is_none() => {
+                    let line: String = clean_message_multiline(&raw_text)
+                        .lines()
+                        .rev()
+                        .map(|l| l.trim())
+                        .find(|l| !l.is_empty())
+                        .unwrap_or("")
+                        .chars()
+                        .take(200)
+                        .collect();
+                    if !line.is_empty() {
+                        last_assistant = Some(line);
+                    }
+                }
+                _ => {}
+            }
+
+            if last_user.is_some() && last_assistant.is_some() {
+                return (last_user, last_assistant);
+            }
+        }
+
+        if start == 0 || window >= max_window {
+            return (last_user, last_assistant);
+        }
+        window = (window * 2).min(max_window);
+    }
 }
 
 /// Load all conversation messages (user + assistant) from a session JSONL file.

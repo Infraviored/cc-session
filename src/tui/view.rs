@@ -31,14 +31,14 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 fn render_session_list(frame: &mut Frame, app: &App, area: Rect) {
     let width = area.width.saturating_sub(2) as usize; // account for left/right borders
     let height = area.height as usize;
-    let visible_items = height.saturating_sub(2); // account for top/bottom borders
+    let visible_lines = height.saturating_sub(2); // account for top/bottom borders
     let mut lines: Vec<Line> = Vec::new();
 
     let terms = search_terms(app);
     let term_refs: Vec<&str> = terms.iter().map(|s| s.as_str()).collect();
 
     let start = app.scroll_offset;
-    let end = (start + visible_items).min(app.display_items.len());
+    let (_, end) = app.visible_range(start, visible_lines);
 
     for i in start..end {
         let item = &app.display_items[i];
@@ -126,6 +126,24 @@ fn render_session_list(frame: &mut Frame, app: &App, area: Rect) {
                     lines.push(line.patch_style(Style::default().bg(app.theme.selected_bg)));
                 } else {
                     lines.push(line);
+                }
+
+                if !session.last_assistant_line.is_empty() {
+                    let indent = " ".repeat(cursor_len + 2);
+                    let reply_prefix = "\u{21B3} ";
+                    let reply_max = width
+                        .saturating_sub(indent.chars().count() + reply_prefix.chars().count());
+                    let reply_text = truncate_str(&session.last_assistant_line, reply_max);
+                    let reply_line = Line::from(vec![
+                        Span::raw(indent),
+                        Span::styled(reply_prefix, dim),
+                        Span::styled(reply_text, dim),
+                    ]);
+                    if is_selected {
+                        lines.push(reply_line.patch_style(Style::default().bg(app.theme.selected_bg)));
+                    } else {
+                        lines.push(reply_line);
+                    }
                 }
             }
             DisplayItem::Header(group) => {

@@ -13,6 +13,9 @@ pub struct Session {
     pub git_branch: Option<String>,
     pub timestamp: DateTime<Utc>,
     pub first_message: String,
+    /// Last line of the most recent assistant text reply, for the list's
+    /// indented second row. Empty if the session has no assistant reply yet.
+    pub last_assistant_line: String,
     pub cwd: String,
     pub project_exists: bool,
 }

@@ -19,7 +19,7 @@ use crossterm::terminal::{
 use ratatui::prelude::*;
 
 use crate::clipboard;
-use crate::discovery::{get_claude_home, load_conversation};
+use crate::discovery::{discover_sessions, get_claude_home, load_conversation};
 use crate::filter::filter_sessions;
 use crate::search::{self, SearchResult};
 use crate::session::{ConversationMessage, Session};
@@ -193,6 +193,41 @@ impl App {
         self.scroll_offset = 0;
     }
 
+    /// Replace the session list with a freshly rescanned one (periodic
+    /// background poll), keeping the current filter, selection and scroll
+    /// position stable. Skipped while a background content search is in
+    /// flight, so a rescan can't race its cancel flag / receiver.
+    pub fn refresh_sessions(&mut self, new_sessions: Vec<Session>, claude_home: &std::path::Path) {
+        if self.content_search_state == ContentSearchState::Searching {
+            return;
+        }
+
+        let selected_id = self
+            .display_items
+            .get(self.selected)
+            .and_then(|item| match item {
+                DisplayItem::Session(e) => Some(self.display_session(e).id.clone()),
+                DisplayItem::Header(_) => None,
+            });
+
+        self.sessions = new_sessions;
+        self.session_index = Arc::new(search::build_session_index(claude_home, &self.sessions));
+        self.filtered_indices = filter_sessions(&self.sessions, &self.filter_query);
+        self.rebuild_display_items();
+
+        if let Some(id) = selected_id {
+            if let Some(pos) = self.display_items.iter().position(|item| match item {
+                DisplayItem::Session(e) => self.display_session(e).id == id,
+                DisplayItem::Header(_) => false,
+            }) {
+                self.selected = pos;
+            } else {
+                self.selected = self.selected.min(self.display_items.len().saturating_sub(1));
+            }
+        }
+        self.scroll_offset = self.scroll_offset.min(self.selected);
+    }
+
     /// Build merged display items from metadata matches and content results.
     ///
     /// In flat mode: wraps each DisplayEntry in DisplayItem::Session (existing behavior).
@@ -349,19 +384,94 @@ impl App {
         self.selected = self.selected.saturating_sub(1);
     }
 
+    /// Line height of a display item: session rows with a last-assistant-line
+    /// preview take 2 lines (message + indented reply), everything else 1.
+    fn item_height(&self, idx: usize) -> usize {
+        match self.display_items.get(idx) {
+            Some(DisplayItem::Session(entry)) => {
+                let session = self.display_session(entry);
+                if session.last_assistant_line.trim().is_empty() {
+                    1
+                } else {
+                    2
+                }
+            }
+            _ => 1,
+        }
+    }
+
+    /// The display item rendered at `row` lines below `scroll_offset`
+    /// (0-based), accounting for variable item heights.
+    pub fn item_at_line(&self, scroll_offset: usize, row: usize) -> Option<usize> {
+        let mut acc = 0usize;
+        let mut idx = scroll_offset;
+        while idx < self.display_items.len() {
+            let h = self.item_height(idx);
+            if row < acc + h {
+                return Some(idx);
+            }
+            acc += h;
+            idx += 1;
+        }
+        None
+    }
+
+    /// The half-open range `[start, end)` of display items that fit within
+    /// `visible_lines`, rendered starting at `scroll_offset`. Items have
+    /// variable line height, so this is not simply `scroll_offset + count`.
+    pub fn visible_range(&self, scroll_offset: usize, visible_lines: usize) -> (usize, usize) {
+        let mut acc = 0usize;
+        let mut end = scroll_offset;
+        while end < self.display_items.len() {
+            let h = self.item_height(end);
+            if acc > 0 && acc + h > visible_lines {
+                break;
+            }
+            acc += h;
+            end += 1;
+            if acc >= visible_lines {
+                break;
+            }
+        }
+        (scroll_offset, end)
+    }
+
     /// Ensure the selected item is visible by adjusting scroll_offset.
-    pub fn ensure_visible(&mut self, visible_items: usize) {
-        if visible_items == 0 {
+    pub fn ensure_visible(&mut self, visible_lines: usize) {
+        if visible_lines == 0 || self.display_items.is_empty() {
             return;
         }
         if self.mode == Mode::Conversation || self.mode == Mode::ConversationSearch {
             return;
         }
+
         if self.selected < self.scroll_offset {
             self.scroll_offset = self.selected;
-        } else if self.selected >= self.scroll_offset + visible_items {
-            self.scroll_offset = self.selected - visible_items + 1;
+            return;
         }
+
+        let (_, end) = self.visible_range(self.scroll_offset, visible_lines);
+        if self.selected < end {
+            return; // already visible
+        }
+
+        // Bottom-align: walk backward from `selected`, accumulating heights,
+        // to find the topmost item that still fits above it.
+        let mut acc = 0usize;
+        let mut offset = self.selected;
+        loop {
+            let h = self.item_height(offset);
+            if acc > 0 && acc + h > visible_lines {
+                offset += 1;
+                break;
+            }
+            acc += h;
+            if offset == 0 {
+                break;
+            }
+            offset -= 1;
+        }
+        self.scroll_offset = offset;
     }
 
     /// Enter conversation viewer for a display item.
@@ -534,6 +644,14 @@ pub fn run(
     let mut deferred_command: Option<String> = None;
     let mut deferred_cwd: Option<String> = None;
 
+    // Rescan ~/.claude/projects/ periodically so sessions being actively
+    // written elsewhere (timestamps, last-message previews) stay current
+    // without needing to relaunch. A full rescan is cheap (tail-reads only,
+    // no matter the JSONL file size -- ~23ms for 94 sessions), so a short
+    // interval costs well under 1% CPU.
+    const REFRESH_INTERVAL: Duration = Duration::from_secs(3);
+    let mut last_refresh = Instant::now();
+
     loop {
         app.tick_status();
 
@@ -543,6 +661,13 @@ pub fn run(
 
         if app.mode == Mode::Browsing {
             app.check_debounce();
+        }
+
+        if last_refresh.elapsed() >= REFRESH_INTERVAL {
+            last_refresh = Instant::now();
+            if app.mode == Mode::Browsing {
+                app.refresh_sessions(discover_sessions(&claude_home), &claude_home);
+            }
         }
 
         terminal.draw(|frame| {
@@ -611,8 +736,9 @@ pub fn run(
                         MouseEventKind::Down(crossterm::event::MouseButton::Left) if app.mode == Mode::Browsing => {
                             let clicked_row = mouse.row as usize;
                             if clicked_row >= 1 {
-                                let item_idx = app.scroll_offset + clicked_row - 1;
-                                if item_idx < app.display_items.len() {
+                                let item_idx =
+                                    app.item_at_line(app.scroll_offset, clicked_row - 1);
+                                if let Some(item_idx) = item_idx {
                                     if item_idx == app.selected {
                                         match &app.display_items[item_idx] {
                                             DisplayItem::Header(group) => {
