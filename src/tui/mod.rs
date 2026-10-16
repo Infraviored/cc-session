@@ -19,7 +19,8 @@ use crossterm::terminal::{
 use ratatui::prelude::*;
 
 use crate::clipboard;
-use crate::discovery::{discover_sessions, get_claude_home, load_conversation};
+use crate::config::Config;
+use crate::discovery::{discover_profiles, load_conversation};
 use crate::filter::filter_sessions;
 use crate::search::{self, SearchResult};
 use crate::session::{ConversationMessage, Session};
@@ -80,6 +81,14 @@ pub struct ProjectGroup {
 pub enum DisplayItem {
     Session(DisplayEntry),
     Header(ProjectGroup),
+}
+
+/// A row of the launch menu (Alt-M).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuRow {
+    Mode(usize),
+    /// `None` is "auto": the profile the session was found in.
+    Profile(Option<usize>),
 }
 
 /// What the input handler tells the main loop to do.
@@ -147,6 +156,13 @@ pub struct App {
     pub grouped_mode: bool,
     /// Set of project names whose groups are currently expanded.
     pub expanded_projects: HashSet<String>,
+    /// Profiles, launch modes and the current mode.
+    pub config: Config,
+    /// Highlighted row while the launch-mode menu (Alt-M) is open.
+    pub mode_menu: Option<usize>,
+    /// Session to resume when the menu was opened with Alt-Enter: Enter in
+    /// the menu then picks the row and resumes right away.
+    pub menu_launch: Option<Session>,
 }
 
 impl App {
@@ -182,7 +198,35 @@ impl App {
             syntax_highlighter: syntax::SyntaxHighlighter::new(),
             grouped_mode: false,
             expanded_projects: HashSet::new(),
+            config: Config::default(),
+            mode_menu: None,
+            menu_launch: None,
         }
+    }
+
+    /// Rows of the launch menu: all modes, then (with several profiles)
+    /// "auto" and each profile.
+    pub fn menu_rows(&self) -> Vec<MenuRow> {
+        let mut rows: Vec<MenuRow> = (0..self.config.modes.len()).map(MenuRow::Mode).collect();
+        if self.config.profiles.len() > 1 {
+            rows.push(MenuRow::Profile(None));
+            rows.extend((0..self.config.profiles.len()).map(|i| MenuRow::Profile(Some(i))));
+        }
+        rows
+    }
+
+    /// Whether `row` is the current choice in its section.
+    pub fn menu_row_active(&self, row: MenuRow) -> bool {
+        match row {
+            MenuRow::Mode(i) => self.config.mode == i,
+            MenuRow::Profile(p) => self.config.profile_override == p,
+        }
+    }
+
+    /// Command resuming `session` with the current launch mode.
+    pub fn resume_command(&self, session: &Session) -> String {
+        self.config
+            .resume_command(session, self.config.current_mode())
     }
 
     /// Re-run the metadata filter and rebuild display items.
@@ -197,7 +241,7 @@ impl App {
     /// background poll), keeping the current filter, selection and scroll
     /// position stable. Skipped while a background content search is in
     /// flight, so a rescan can't race its cancel flag / receiver.
-    pub fn refresh_sessions(&mut self, new_sessions: Vec<Session>, claude_home: &std::path::Path) {
+    pub fn refresh_sessions(&mut self, new_sessions: Vec<Session>) {
         if self.content_search_state == ContentSearchState::Searching {
             return;
         }
@@ -211,7 +255,7 @@ impl App {
             });
 
         self.sessions = new_sessions;
-        self.session_index = Arc::new(search::build_session_index(claude_home, &self.sessions));
+        self.session_index = Arc::new(search::build_session_index(&self.sessions));
         self.filtered_indices = filter_sessions(&self.sessions, &self.filter_query);
         self.rebuild_display_items();
 
@@ -484,8 +528,7 @@ impl App {
             DisplayItem::Header(_) => return, // Cannot enter conversation on a header
         };
         let session = self.display_session(entry).clone();
-        let claude_home = get_claude_home();
-        let messages = load_conversation(&claude_home, &session);
+        let messages = load_conversation(&session);
 
         let initial_search_terms = crate::filter::parse_keywords(&self.filter_query);
 
@@ -592,12 +635,12 @@ impl App {
                 let (tx, rx) = mpsc::channel();
                 self.search_receiver = Some(rx);
 
-                let claude_home = get_claude_home();
+                let profiles = self.config.profiles.clone();
                 let index = Arc::clone(&self.session_index);
                 let pattern = self.filter_query.clone();
                 std::thread::spawn(move || {
                     let results =
-                        search::deep_search_indexed(&claude_home, &pattern, &index, &cancel);
+                        search::deep_search_indexed(&profiles, &pattern, &index, &cancel);
                     let _ = tx.send(results);
                 });
             }
@@ -615,10 +658,16 @@ impl App {
 }
 
 /// Run the interactive TUI session picker.
+///
+/// With `exec_file` set, the resume command is written there instead of run,
+/// so a shell function can `eval` it in the user's own shell (see
+/// `cc-session init`): the `cd` then really changes that shell's directory.
 pub fn run(
     sessions: Vec<Session>,
     theme: Theme,
+    config: Config,
     cd_file: Option<String>,
+    exec_file: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if sessions.is_empty() {
         eprintln!("No sessions found.");
@@ -638,9 +687,9 @@ pub fn run(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let claude_home = get_claude_home();
-    let session_index = search::build_session_index(&claude_home, &sessions);
+    let session_index = search::build_session_index(&sessions);
     let mut app = App::new(sessions, session_index, theme);
+    app.config = config;
     let mut deferred_command: Option<String> = None;
     let mut deferred_cwd: Option<String> = None;
 
@@ -666,7 +715,7 @@ pub fn run(
         if last_refresh.elapsed() >= REFRESH_INTERVAL {
             last_refresh = Instant::now();
             if app.mode == Mode::Browsing {
-                app.refresh_sessions(discover_sessions(&claude_home), &claude_home);
+                app.refresh_sessions(discover_profiles(&app.config.profiles));
             }
         }
 
@@ -702,7 +751,7 @@ pub fn run(
                         Action::Continue => {}
                     }
                 }
-                Event::Mouse(mouse) => {
+                Event::Mouse(mouse) if app.mode_menu.is_none() => {
                     match mouse.kind {
                         MouseEventKind::ScrollDown => {
                             match app.mode {
@@ -771,6 +820,13 @@ pub fn run(
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
+
+    if let (Some(cmd), Some(path)) = (&deferred_command, &exec_file) {
+        if deferred_cwd.is_some() {
+            std::fs::write(path, cmd)?;
+            return Ok(());
+        }
+    }
 
     if let Some(cmd) = deferred_command {
         if let (Some(ref cd_path), Some(ref cwd)) = (&cd_file, &deferred_cwd) {

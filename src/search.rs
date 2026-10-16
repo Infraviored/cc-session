@@ -9,6 +9,8 @@ use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 use regex::Regex;
 
+use crate::config::{distinct_projects_dirs, Profile};
+use crate::discovery::session_files;
 use crate::filter::parse_keywords;
 use crate::session::{clean_message, clean_message_multiline, Session, SessionFileEntry};
 
@@ -44,19 +46,11 @@ pub struct SearchResult {
 ///
 /// Maps each session's JSONL file path to a clone of the Session.
 /// Used by `deep_search_indexed` to avoid re-parsing files for metadata.
-pub fn build_session_index(claude_home: &Path, sessions: &[Session]) -> HashMap<PathBuf, Session> {
-    let projects_dir = claude_home.join("projects");
-    let mut index = HashMap::with_capacity(sessions.len());
-
-    for session in sessions {
-        let encoded_dir = session.project_path.replace('/', "-");
-        let file_path = projects_dir
-            .join(&encoded_dir)
-            .join(format!("{}.jsonl", session.id));
-        index.insert(file_path, session.clone());
-    }
-
-    index
+pub fn build_session_index(sessions: &[Session]) -> HashMap<PathBuf, Session> {
+    sessions
+        .iter()
+        .map(|s| (s.file_path.clone(), s.clone()))
+        .collect()
 }
 
 /// Search through all session JSONL files for lines matching all keywords,
@@ -66,7 +60,7 @@ pub fn build_session_index(claude_home: &Path, sessions: &[Session]) -> HashMap<
 /// All keywords must match somewhere in the file (AND logic).
 /// Falls back to parsing the file if no index entry exists.
 pub fn deep_search_indexed(
-    claude_home: &Path,
+    profiles: &[Profile],
     pattern: &str,
     session_index: &HashMap<PathBuf, Session>,
     cancel: &Arc<AtomicBool>,
@@ -88,33 +82,19 @@ pub fn deep_search_indexed(
         return Vec::new();
     }
 
-    let projects_dir = claude_home.join("projects");
-    if !projects_dir.is_dir() {
-        return Vec::new();
-    }
-
-    // Collect all .jsonl file paths
-    let mut jsonl_files: Vec<PathBuf> = Vec::new();
-    if let Ok(entries) = fs::read_dir(&projects_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if let Ok(files) = fs::read_dir(&path) {
-                    for file in files.flatten() {
-                        let fpath = file.path();
-                        if fpath.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                            jsonl_files.push(fpath);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let jsonl_files: Vec<(PathBuf, &str)> = distinct_projects_dirs(profiles)
+        .into_iter()
+        .flat_map(|p| {
+            session_files(&p.config_dir)
+                .into_iter()
+                .map(move |f| (f, p.name.as_str()))
+        })
+        .collect();
 
     // Search files in parallel, look up session from index, pair with snippet
     let mut results: Vec<SearchResult> = jsonl_files
         .par_iter()
-        .filter_map(|path| {
+        .filter_map(|(path, profile)| {
             // Check cancellation flag
             if cancel.load(Ordering::Relaxed) {
                 return None;
@@ -126,7 +106,9 @@ pub fn deep_search_indexed(
             } else {
                 // Fallback: parse file for metadata (undiscovered session)
                 let fallback_re = &regexes[0];
-                search_file_with_metadata(path, fallback_re)?
+                let mut session = search_file_with_metadata(path, fallback_re)?;
+                session.profile = profile.to_string();
+                session
             };
             Some(SearchResult {
                 session,
@@ -155,27 +137,7 @@ pub fn deep_search(claude_home: &Path, pattern: &str) -> Vec<Session> {
         }
     };
 
-    let projects_dir = claude_home.join("projects");
-    if !projects_dir.is_dir() {
-        return Vec::new();
-    }
-
-    let mut jsonl_files: Vec<PathBuf> = Vec::new();
-    if let Ok(entries) = fs::read_dir(&projects_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if let Ok(files) = fs::read_dir(&path) {
-                    for file in files.flatten() {
-                        let fpath = file.path();
-                        if fpath.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                            jsonl_files.push(fpath);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let jsonl_files = session_files(claude_home);
 
     let mut sessions: Vec<Session> = jsonl_files
         .par_iter()
@@ -544,7 +506,7 @@ fn search_file_with_metadata(path: &Path, re: &Regex) -> Option<Session> {
     }
 
     let entry = first_user_entry?;
-    let cwd = entry.cwd.unwrap_or_default();
+    let cwd = crate::discovery::resolve_cwd(path, entry.cwd.unwrap_or_default());
     let timestamp: DateTime<Utc> = entry
         .timestamp
         .and_then(|t| t.parse().ok())
@@ -588,6 +550,9 @@ fn search_file_with_metadata(path: &Path, re: &Regex) -> Option<Session> {
         last_assistant_line: String::new(),
         cwd,
         project_exists,
+        name: crate::discovery::session_title(path),
+        profile: String::new(),
+        file_path: path.to_path_buf(),
     })
 }
 

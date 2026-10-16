@@ -1,5 +1,7 @@
 // Session and related data types for Claude Code session parsing
 
+use std::path::PathBuf;
+
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
@@ -18,17 +20,13 @@ pub struct Session {
     pub last_assistant_line: String,
     pub cwd: String,
     pub project_exists: bool,
-}
-
-impl Session {
-    /// Build the shell command to resume this session.
-    ///
-    /// The path is single-quoted to handle spaces and special characters.
-    pub fn resume_command(&self) -> String {
-        // Single-quote the path, escaping any embedded single quotes
-        let escaped_cwd = self.cwd.replace('\'', "'\\''");
-        format!("cd '{}' && claude -r {}", escaped_cwd, self.id)
-    }
+    /// Title shown for the session: set with /rename, the Remote Control
+    /// agent name, or Claude's generated title, in that order of preference.
+    pub name: Option<String>,
+    /// Name of the configured profile (Claude config dir) it belongs to.
+    pub profile: String,
+    /// The session's JSONL transcript.
+    pub file_path: PathBuf,
 }
 
 /// A single line from a session JSONL file.

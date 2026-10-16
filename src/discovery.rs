@@ -1,12 +1,16 @@
 // Session discovery: scanning ~/.claude/projects/ for session JSONL files
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use chrono::{DateTime, Utc};
 use rayon::prelude::*;
+use serde::Deserialize;
 
+use crate::config::{distinct_projects_dirs, Profile};
 use crate::session::{
     clean_message, clean_message_multiline, is_meta_message, ConversationMessage, MessageRole,
     Session, SessionFileEntry,
@@ -14,26 +18,23 @@ use crate::session::{
 
 /// Return the Claude home directory.
 ///
-/// Checks the `CLAUDE_HOME` env var first, then falls back to `~/.claude`.
+/// Checks the `CLAUDE_HOME` env var first, then Claude Code's own
+/// `CLAUDE_CONFIG_DIR`, then falls back to `~/.claude`.
 pub fn get_claude_home() -> PathBuf {
-    if let Ok(home) = std::env::var("CLAUDE_HOME") {
-        return PathBuf::from(home);
+    for var in ["CLAUDE_HOME", "CLAUDE_CONFIG_DIR"] {
+        if let Some(home) = std::env::var_os(var).filter(|v| !v.is_empty()) {
+            return PathBuf::from(home);
+        }
     }
     dirs::home_dir()
         .expect("could not determine home directory")
         .join(".claude")
 }
 
-/// Discover all sessions under `claude_home/projects/`.
-pub fn discover_sessions(claude_home: &Path) -> Vec<Session> {
-    let projects_dir = claude_home.join("projects");
-    if !projects_dir.is_dir() {
-        return Vec::new();
-    }
-
-    // Collect all .jsonl file paths
+/// All session transcripts under `claude_home/projects/<project>/`.
+pub fn session_files(claude_home: &Path) -> Vec<PathBuf> {
     let mut jsonl_files: Vec<PathBuf> = Vec::new();
-    if let Ok(entries) = fs::read_dir(&projects_dir) {
+    if let Ok(entries) = fs::read_dir(claude_home.join("projects")) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
@@ -48,16 +49,116 @@ pub fn discover_sessions(claude_home: &Path) -> Vec<Session> {
             }
         }
     }
+    jsonl_files
+}
+
+/// Discover all sessions under `claude_home/projects/`.
+#[allow(dead_code)]
+pub fn discover_sessions(claude_home: &Path) -> Vec<Session> {
+    discover_profiles(&[Profile {
+        name: String::new(),
+        config_dir: claude_home.to_path_buf(),
+    }])
+}
+
+/// Discover the sessions of every profile, newest first, each tagged with
+/// the name of the profile it was found in.
+pub fn discover_profiles(profiles: &[Profile]) -> Vec<Session> {
+    let jsonl_files: Vec<(PathBuf, &str)> = distinct_projects_dirs(profiles)
+        .into_iter()
+        .flat_map(|p| {
+            session_files(&p.config_dir)
+                .into_iter()
+                .map(move |f| (f, p.name.as_str()))
+        })
+        .collect();
 
     // Parse files in parallel
     let mut sessions: Vec<Session> = jsonl_files
         .par_iter()
-        .filter_map(|path| parse_session_file(path))
+        .filter_map(|(path, profile)| {
+            let mut session = parse_session_file(path)?;
+            session.profile = profile.to_string();
+            Some(session)
+        })
         .collect();
 
     // Sort by timestamp descending (newest first)
     sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     sessions
+}
+
+/// Session titles found so far in one transcript, and how far it was read.
+#[derive(Default, Clone)]
+struct TitleScan {
+    offset: u64,
+    custom: Option<String>,
+    agent: Option<String>,
+    ai: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TitleEntry {
+    #[serde(rename = "customTitle")]
+    custom_title: Option<String>,
+    #[serde(rename = "agentName")]
+    agent_name: Option<String>,
+    #[serde(rename = "aiTitle")]
+    ai_title: Option<String>,
+}
+
+/// The session's display name: the latest `/rename` title, else the latest
+/// Remote Control agent name, else Claude's generated title.
+///
+/// These entries can sit anywhere in the transcript, so the whole file has
+/// to be read -- but only once: the scan position is cached per file and the
+/// periodic refresh only reads what was appended since.
+pub fn session_title(path: &Path) -> Option<String> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, TitleScan>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let mut scan = cache
+        .lock()
+        .ok()
+        .and_then(|c| c.get(path).cloned())
+        .unwrap_or_default();
+
+    if let Ok(mut file) = fs::File::open(path) {
+        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        if len < scan.offset {
+            // Rewritten from scratch; start over.
+            scan = TitleScan::default();
+        }
+        if len > scan.offset && file.seek(SeekFrom::Start(scan.offset)).is_ok() {
+            let mut reader = BufReader::new(file);
+            let mut line = Vec::new();
+            while let Ok(n) = reader.read_until(b'\n', &mut line) {
+                // Stop before a half-written last line; it's read next time.
+                if n == 0 || line.last() != Some(&b'\n') {
+                    break;
+                }
+                scan.offset += n as u64;
+                let text = String::from_utf8_lossy(&line);
+                if text.contains("\"customTitle\"")
+                    || text.contains("\"agentName\"")
+                    || text.contains("\"aiTitle\"")
+                {
+                    if let Ok(e) = serde_json::from_str::<TitleEntry>(&text) {
+                        let keep = |t: Option<String>| t.filter(|t| !t.trim().is_empty());
+                        scan.custom = keep(e.custom_title).or(scan.custom);
+                        scan.agent = keep(e.agent_name).or(scan.agent);
+                        scan.ai = keep(e.ai_title).or(scan.ai);
+                    }
+                }
+                line.clear();
+            }
+        }
+    }
+
+    let name = scan.custom.clone().or(scan.agent.clone()).or(scan.ai.clone());
+    if let Ok(mut c) = cache.lock() {
+        c.insert(path.to_path_buf(), scan);
+    }
+    name
 }
 
 /// Parse a single JSONL session file and extract the most recent user message.
@@ -67,8 +168,8 @@ fn parse_session_file(path: &Path) -> Option<Session> {
     let file = fs::File::open(path).ok()?;
     let reader = BufReader::new(file);
 
-    // cwd/branch never change within a session, so the first user entry is
-    // enough for metadata -- stop as soon as it's found.
+    // Branch comes from the first user entry; cwd too, unless that directory
+    // has since been moved -- see resolve_cwd.
     let mut cwd = String::new();
     let mut git_branch: Option<String> = None;
     let mut found_metadata = false;
@@ -99,6 +200,7 @@ fn parse_session_file(path: &Path) -> Option<Session> {
     if !found_metadata {
         return None;
     }
+    let cwd = resolve_cwd(path, cwd);
 
     // The messages shown in the list are the most recent ones, not the
     // first -- read backwards from the end of the file instead of scanning
@@ -134,7 +236,95 @@ fn parse_session_file(path: &Path) -> Option<Session> {
         last_assistant_line,
         cwd,
         project_exists,
+        name: session_title(path),
+        profile: String::new(),
+        file_path: path.to_path_buf(),
     })
+}
+
+/// Pick a working directory that still exists for a session.
+///
+/// A session's first `cwd` is usually right, but when its folder is moved and
+/// the session is resumed from the new place, the early entries keep the old
+/// path and only later ones carry the new one. Falls back to the last `cwd` in
+/// the file that exists, then to the directory the transcript's project folder
+/// name decodes to. Returns `first` unchanged if nothing better turns up.
+pub fn resolve_cwd(path: &Path, first: String) -> String {
+    if first.is_empty() || Path::new(&first).is_dir() {
+        return first;
+    }
+    if let Some(found) = last_existing_cwd(path, &first) {
+        return found;
+    }
+    path.parent()
+        .and_then(|d| d.file_name())
+        .and_then(|n| n.to_str())
+        .and_then(decode_project_dir)
+        .unwrap_or(first)
+}
+
+/// Scan every line for a `"cwd":"..."` value and return the last one (other
+/// than `skip`) that is an existing directory. Plain substring search, not a
+/// JSON parse, since this reads the whole file.
+fn last_existing_cwd(path: &Path, skip: &str) -> Option<String> {
+    const KEY: &str = "\"cwd\":\"";
+    let reader = BufReader::new(fs::File::open(path).ok()?);
+    let mut prev = skip.to_string();
+    let mut best = None;
+    for line in reader.lines().map_while(Result::ok) {
+        let Some(start) = line.find(KEY).map(|i| i + KEY.len()) else {
+            continue;
+        };
+        let Some(len) = line[start..].find('"') else {
+            continue;
+        };
+        let cwd = &line[start..start + len];
+        if cwd == prev {
+            continue;
+        }
+        prev = cwd.to_string();
+        if Path::new(cwd).is_dir() {
+            best = Some(cwd.to_string());
+        }
+    }
+    best
+}
+
+/// Claude Code's project folder name for a directory: every character that
+/// isn't ASCII alphanumeric becomes `-`.
+fn encode_project_dir(dir: &str) -> String {
+    dir.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// Find the existing directory whose encoded name is `name`. The encoding is
+/// lossy, so walk the filesystem from `/`, descending only into children whose
+/// encoded path is still a prefix of `name`.
+fn decode_project_dir(name: &str) -> Option<String> {
+    fn walk(dir: &Path, name: &str, depth: usize) -> Option<PathBuf> {
+        let enc = encode_project_dir(dir.to_str()?);
+        if enc == name {
+            return Some(dir.to_path_buf());
+        }
+        if depth > 32 {
+            return None;
+        }
+        for entry in fs::read_dir(dir).ok()?.flatten() {
+            let child = entry.path();
+            let Some(child_str) = child.to_str() else { continue };
+            let child_enc = encode_project_dir(child_str);
+            let fits = child_enc == name
+                || (name.starts_with(&child_enc) && name.as_bytes()[child_enc.len()] == b'-');
+            if fits && child.is_dir() {
+                if let Some(found) = walk(&child, name, depth + 1) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+    walk(Path::new("/"), name, 0).map(|p| p.to_string_lossy().into_owned())
 }
 
 /// Find the most recent non-meta user message and the most recent assistant
@@ -236,14 +426,8 @@ fn read_tail_previews(path: &Path) -> (Option<String>, Option<String>) {
 /// system entries, tool-use blocks, and meta-messages. Consecutive messages from
 /// the same role are merged into a single message with paragraphs separated by
 /// blank lines.
-pub fn load_conversation(claude_home: &Path, session: &Session) -> Vec<ConversationMessage> {
-    let encoded_dir = session.project_path.replace('/', "-");
-    let file_path = claude_home
-        .join("projects")
-        .join(&encoded_dir)
-        .join(format!("{}.jsonl", session.id));
-
-    let file = match fs::File::open(&file_path) {
+pub fn load_conversation(session: &Session) -> Vec<ConversationMessage> {
+    let file = match fs::File::open(&session.file_path) {
         Ok(f) => f,
         Err(_) => return Vec::new(),
     };

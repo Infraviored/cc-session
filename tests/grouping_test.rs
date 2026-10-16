@@ -20,6 +20,9 @@ fn make_session(id: &str, project: &str, hours_ago: i64, message: &str) -> Sessi
         last_assistant_line: String::new(),
         cwd: format!("/test/{}", project),
         project_exists: true,
+        name: None,
+        profile: String::new(),
+        file_path: PathBuf::from(format!("/test/{}/{}.jsonl", project, id)),
     }
 }
 
