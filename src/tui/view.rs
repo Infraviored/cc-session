@@ -130,8 +130,20 @@ fn render_session_list(frame: &mut Frame, app: &App, area: Rect) {
     };
     let project_width = column_width(|s| s.project_name.chars().count(), (width / 9).clamp(8, 20));
     let profile_width = column_width(|s| s.profile.chars().count(), 12);
-    // "4 minutes ago", "a few seconds ago" etc. -- right-aligned in a fixed slot.
-    const TIME_WIDTH: usize = 14;
+    // Time slot as wide as the longest time on screen, so no gap is left
+    // between the project column and a short time like "a week ago".
+    let now = Utc::now();
+    let time_width = (start..end)
+        .filter_map(|i| match &app.display_items[i] {
+            DisplayItem::Session(e) => Some(
+                time_ago_text(now.signed_duration_since(app.display_session(e).timestamp))
+                    .chars()
+                    .count(),
+            ),
+            DisplayItem::Header(_) => None,
+        })
+        .max()
+        .unwrap_or(0);
 
     for i in start..end {
         let item = &app.display_items[i];
@@ -154,7 +166,7 @@ fn render_session_list(frame: &mut Frame, app: &App, area: Rect) {
                 }
                 if app.config.multi_profile() {
                     right.push(Span::styled(
-                        format!("{:<profile_width$}", truncate_str(&session.profile, profile_width)),
+                        format!("{:<profile_width$}", truncate_column(&session.profile, profile_width)),
                         Style::default().fg(app.theme.profile),
                     ));
                     right.push(Span::raw("  "));
@@ -163,14 +175,14 @@ fn render_session_list(frame: &mut Frame, app: &App, area: Rect) {
                     right.push(Span::styled(
                         format!(
                             "{:<project_width$}",
-                            truncate_str(&session.project_name, project_width)
+                            truncate_column(&session.project_name, project_width)
                         ),
                         Style::default().fg(app.theme.project),
                     ));
                     right.push(Span::raw("  "));
                 }
                 right.push(Span::styled(
-                    format!("{time_ago:>TIME_WIDTH$}"),
+                    format!("{time_ago:>time_width$}"),
                     Style::default().fg(app.theme.time),
                 ));
                 let right_len: usize = right.iter().map(|s| s.content.chars().count()).sum();
@@ -1050,6 +1062,17 @@ fn time_ago_text(delta: chrono::Duration) -> String {
     } else {
         HumanTime::from(-delta).to_text_en(Accuracy::Rough, Tense::Past)
     }
+}
+
+/// Cut `s` to `max_len` characters for a narrow column, keeping as much of
+/// it as fits and marking the cut with a single "…".
+fn truncate_column(s: &str, max_len: usize) -> String {
+    if s.chars().count() <= max_len {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max_len.saturating_sub(1)).collect();
+    out.push('\u{2026}');
+    out
 }
 
 /// Truncate a string to `max_len` characters, adding "..." if truncated.
