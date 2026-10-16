@@ -71,6 +71,12 @@ eval "$(cc-session init bash)"   # or: init zsh
 
 This defines a `cc-session` shell function (pass `--name ccs` to `init` for another name) that prints the command and runs it with `eval`.
 
+On Windows, cc-session resumes through PowerShell (`pwsh`, or the built-in `powershell` if PowerShell 7 isn't installed) and writes the command in PowerShell syntax. For the in-shell version, add this to your `$PROFILE`:
+
+```powershell
+cc-session init powershell | Out-String | Invoke-Expression
+```
+
 ## Launch modes and profiles
 
 Press **Alt-M** to choose how sessions are resumed. Enter (in the conversation view) and Alt-C (in the list) use the choice, which is remembered in `~/.config/cc-session/state`. Alt-Enter (in either view) opens the same menu for the selected session; Enter there picks the highlighted row and resumes.

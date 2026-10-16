@@ -60,6 +60,11 @@ struct Cli {
     #[arg(long = "exec-file", hide = true)]
     exec_file: Option<String>,
 
+    /// Shell syntax of the resume command (default: powershell on Windows,
+    /// posix elsewhere; set by the `cc-session init` functions)
+    #[arg(long, hide = true)]
+    syntax: Option<config::ShellSyntax>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -68,7 +73,8 @@ struct Cli {
 enum Command {
     /// Print a shell function that resumes sessions in your current shell,
     /// so it really changes into the session's directory. Add to your rc file:
-    /// eval "$(cc-session init bash)"
+    /// eval "$(cc-session init bash)", or in PowerShell's $PROFILE:
+    /// cc-session init powershell | Out-String | Invoke-Expression
     Init {
         shell: Shell,
         /// Name of the shell function
@@ -81,26 +87,31 @@ enum Command {
 enum Shell {
     Bash,
     Zsh,
+    #[value(alias = "pwsh")]
+    Powershell,
 }
 
 /// Shell function that runs cc-session with `--exec-file` and then `eval`s
 /// the resume command it wrote, so the `cd` happens in the calling shell and
 /// the command lands in its history.
 fn shell_init(shell: Shell, name: &str) -> String {
+    if let Shell::Powershell = shell {
+        return powershell_init(name);
+    }
     // `command` keeps the fallback from calling the function itself.
     let exe = std::env::current_exe()
         .map(|p| config::shell_quote(&p.to_string_lossy()))
         .unwrap_or_else(|_| "command cc-session".to_string());
     let history = match shell {
-        Shell::Bash => r#"history -s "$__ccs_cmd""#,
         Shell::Zsh => r#"print -s -- "$__ccs_cmd""#,
+        _ => r#"history -s "$__ccs_cmd""#,
     };
     format!(
         r#"unalias {name} 2>/dev/null
 {name}() {{
   local __ccs_file __ccs_cmd __ccs_rc
   __ccs_file=$(mktemp) || return
-  {exe} --exec-file "$__ccs_file" "$@"
+  {exe} --syntax posix --exec-file "$__ccs_file" "$@"
   __ccs_rc=$?
   __ccs_cmd=$(cat "$__ccs_file")
   rm -f "$__ccs_file"
@@ -108,6 +119,31 @@ fn shell_init(shell: Shell, name: &str) -> String {
   printf '%s\n' "$__ccs_cmd"
   {history}
   eval "$__ccs_cmd"
+}}
+"#,
+    )
+}
+
+/// PowerShell version of `shell_init`: `Invoke-Expression` instead of `eval`,
+/// PSReadLine's history instead of the shell's.
+fn powershell_init(name: &str) -> String {
+    let exe = std::env::current_exe()
+        .map(|p| config::ps_quote(&p.to_string_lossy()))
+        .unwrap_or_else(|_| "(Get-Command -CommandType Application cc-session)[0]".to_string());
+    format!(
+        r#"function {name} {{
+  $__ccs_file = New-TemporaryFile
+  try {{
+    & {exe} --syntax powershell --exec-file $__ccs_file.FullName @args
+    $__ccs_rc = $LASTEXITCODE
+    $__ccs_cmd = Get-Content -Raw -LiteralPath $__ccs_file.FullName
+  }} finally {{
+    Remove-Item -LiteralPath $__ccs_file.FullName -ErrorAction SilentlyContinue
+  }}
+  if (-not $__ccs_cmd) {{ $global:LASTEXITCODE = $__ccs_rc; return }}
+  Write-Host $__ccs_cmd
+  try {{ [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory($__ccs_cmd) }} catch {{ }}
+  Invoke-Expression $__ccs_cmd
 }}
 "#,
     )
@@ -158,6 +194,9 @@ fn main() {
         eprintln!("Invalid config: {e}");
         std::process::exit(1);
     });
+    if let Some(syntax) = cli.syntax {
+        config.syntax = syntax;
+    }
     if let Some(name) = &cli.mode {
         if !config.select_mode(name) {
             let names: Vec<&str> = config.modes.iter().map(|m| m.name.as_str()).collect();

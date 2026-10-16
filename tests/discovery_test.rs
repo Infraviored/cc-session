@@ -67,9 +67,8 @@ fn empty_directory_returns_empty() {
 }
 
 fn user_line(cwd: &str) -> String {
-    format!(
-        r#"{{"type":"user","cwd":"{cwd}","message":{{"role":"user","content":"hi"}}}}"#
-    )
+    let cwd = serde_json::to_string(cwd).unwrap();
+    format!(r#"{{"type":"user","cwd":{cwd},"message":{{"role":"user","content":"hi"}}}}"#)
 }
 
 #[test]

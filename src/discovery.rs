@@ -292,16 +292,23 @@ fn last_existing_cwd(path: &Path, skip: &str) -> Option<String> {
         let Some(start) = line.find(KEY).map(|i| i + KEY.len()) else {
             continue;
         };
-        let Some(len) = line[start..].find('"') else {
+        // The end is the first quote not escaped by a backslash.
+        let rest = &line.as_bytes()[start..];
+        let Some(len) = (0..rest.len()).find(|&i| {
+            rest[i] == b'"' && rest[..i].iter().rev().take_while(|&&b| b == b'\\').count() % 2 == 0
+        }) else {
             continue;
         };
-        let cwd = &line[start..start + len];
+        // Unescape, so Windows paths come out with single backslashes.
+        let Ok(cwd) = serde_json::from_str::<String>(&line[start - 1..start + len + 1]) else {
+            continue;
+        };
         if cwd == prev {
             continue;
         }
-        prev = cwd.to_string();
-        if Path::new(cwd).is_dir() {
-            best = Some(cwd.to_string());
+        prev = cwd.clone();
+        if Path::new(&cwd).is_dir() {
+            best = Some(cwd);
         }
     }
     best
@@ -341,7 +348,18 @@ fn decode_project_dir(name: &str) -> Option<String> {
         }
         None
     }
-    walk(Path::new("/"), name, 0).map(|p| p.to_string_lossy().into_owned())
+    walk(&filesystem_root(name)?, name, 0).map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Where `decode_project_dir` starts walking: `/`, or on Windows the root
+/// of the drive the name starts with (`D--Users-...` is `D:\Users\...`).
+fn filesystem_root(name: &str) -> Option<PathBuf> {
+    if cfg!(windows) {
+        let drive = name.chars().next().filter(char::is_ascii_alphabetic)?;
+        Some(PathBuf::from(format!("{drive}:\\")))
+    } else {
+        Some(PathBuf::from("/"))
+    }
 }
 
 /// Find the most recent non-meta user message and the most recent assistant
