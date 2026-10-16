@@ -122,6 +122,17 @@ fn render_session_list(frame: &mut Frame, app: &App, area: Rect) {
     let start = app.scroll_offset;
     let (_, end) = app.visible_range(start, visible_lines);
 
+    // Fixed-width project/profile columns on the right, sized over all
+    // sessions (not just the visible ones) so they don't jump while
+    // scrolling, and capped so they never eat the message.
+    let column_width = |len: fn(&crate::session::Session) -> usize, cap: usize| {
+        app.sessions.iter().map(len).max().unwrap_or(0).min(cap)
+    };
+    let project_width = column_width(|s| s.project_name.chars().count(), (width / 6).max(8));
+    let profile_width = column_width(|s| s.profile.chars().count(), 12);
+    // "4 minutes ago", "a few seconds ago" etc. -- right-aligned in a fixed slot.
+    const TIME_WIDTH: usize = 14;
+
     for i in start..end {
         let item = &app.display_items[i];
         let is_selected = i == app.selected;
@@ -131,23 +142,38 @@ fn render_session_list(frame: &mut Frame, app: &App, area: Rect) {
                 let session = app.display_session(entry);
 
                 let delta = Utc::now().signed_duration_since(session.timestamp);
-                let time_ago = HumanTime::from(-delta).to_text_en(Accuracy::Rough, Tense::Past);
-                let mut right = if app.grouped_mode {
-                    time_ago.clone()
-                } else {
-                    format!("{}  {}", session.project_name, time_ago)
-                };
-                if app.config.multi_profile() {
-                    right = format!("{}  {}", session.profile, right);
+                let time_ago = time_ago_text(delta);
+                // Right side: name (green), profile (violet, only with several
+                // profiles), project (blue column), time (dim, right-aligned).
+                let mut right: Vec<Span> = Vec::new();
+                if let Some(n) = session.name.as_deref() {
+                    // Capped so a long title never crowds out the message.
+                    let n = truncate_str(n, (width / 4).clamp(12, 40));
+                    right.push(Span::styled(n, Style::default().fg(app.theme.heading)));
+                    right.push(Span::raw("  "));
                 }
-                // Session name in front of the dim metadata, capped so a long
-                // title never crowds out the message itself.
-                let name = session
-                    .name
-                    .as_deref()
-                    .map(|n| format!("{}  ", truncate_str(n, (width / 4).clamp(12, 40))))
-                    .unwrap_or_default();
-                let right_len = right.chars().count() + name.chars().count();
+                if app.config.multi_profile() {
+                    right.push(Span::styled(
+                        format!("{:<profile_width$}", truncate_str(&session.profile, profile_width)),
+                        Style::default().fg(app.theme.profile),
+                    ));
+                    right.push(Span::raw("  "));
+                }
+                if !app.grouped_mode {
+                    right.push(Span::styled(
+                        format!(
+                            "{:<project_width$}",
+                            truncate_str(&session.project_name, project_width)
+                        ),
+                        Style::default().fg(app.theme.project),
+                    ));
+                    right.push(Span::raw("  "));
+                }
+                right.push(Span::styled(
+                    format!("{time_ago:>TIME_WIDTH$}"),
+                    Style::default().fg(app.theme.text_dim),
+                ));
+                let right_len: usize = right.iter().map(|s| s.content.chars().count()).sum();
 
                 // In grouped mode, indent session rows under their header
                 let (cursor, cursor_len) = if app.grouped_mode {
@@ -210,10 +236,7 @@ fn render_session_list(frame: &mut Frame, app: &App, area: Rect) {
                     spans.push(Span::raw(padding));
                 };
 
-                if !name.is_empty() {
-                    spans.push(Span::styled(name, Style::default().fg(app.theme.heading)));
-                }
-                spans.push(Span::styled(right, dim));
+                spans.extend(right);
 
                 let line = Line::from(spans);
 
@@ -262,7 +285,7 @@ fn render_session_list(frame: &mut Frame, app: &App, area: Rect) {
                 };
 
                 let delta = Utc::now().signed_duration_since(group.latest_timestamp);
-                let time_ago = HumanTime::from(-delta).to_text_en(Accuracy::Rough, Tense::Past);
+                let time_ago = time_ago_text(delta);
                 let count_str = format!("({})", group.session_count);
                 let right = format!("{}  {}", count_str, time_ago);
                 let right_len = right.len();
@@ -635,7 +658,7 @@ fn pre_render_conversation(
     for msg in messages {
         // Full-width role header bar with integrated timestamp
         let delta = Utc::now().signed_duration_since(msg.timestamp);
-        let time_ago = HumanTime::from(-delta).to_text_en(Accuracy::Rough, Tense::Past);
+        let time_ago = time_ago_text(delta);
 
         let (label, header_bg, header_fg): (&str, Color, Color) = match msg.role {
             MessageRole::User => (
@@ -1017,6 +1040,16 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let bar =
         Paragraph::new(content).style(Style::default().bg(app.theme.status_bar_bg));
     frame.render_widget(bar, area);
+}
+
+/// "4 minutes ago" etc.; humanize renders anything under a minute as
+/// "now ago", so that case is spelled out.
+fn time_ago_text(delta: chrono::Duration) -> String {
+    if delta < chrono::Duration::seconds(45) {
+        "just now".to_string()
+    } else {
+        HumanTime::from(-delta).to_text_en(Accuracy::Rough, Tense::Past)
+    }
 }
 
 /// Truncate a string to `max_len` characters, adding "..." if truncated.
