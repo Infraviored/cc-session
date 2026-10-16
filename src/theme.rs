@@ -35,6 +35,12 @@ pub struct Theme {
     pub selected_bg: Color,
     pub cursor_color: Color,
     pub group_header: Color,
+    /// Project column in the session list.
+    pub project: Color,
+    /// Profile column in the session list (shown with several profiles).
+    pub profile: Color,
+    /// Time column in the session list.
+    pub time: Color,
     // Syntect theme name
     pub syntect_theme: &'static str,
 }
@@ -65,6 +71,9 @@ impl Theme {
             selected_bg: Color::Rgb(35, 45, 65),
             cursor_color: Color::Cyan,
             group_header: Color::Green,
+            project: Color::Rgb(110, 150, 190),
+            profile: Color::Rgb(150, 120, 180),
+            time: Color::Rgb(175, 175, 175),
             syntect_theme: "base16-eighties.dark",
         }
     }
@@ -94,6 +103,9 @@ impl Theme {
             selected_bg: Color::Rgb(210, 220, 240),
             cursor_color: Color::Rgb(0, 130, 150),
             group_header: Color::Rgb(0, 140, 0),
+            project: Color::Rgb(40, 90, 140),
+            profile: Color::Rgb(110, 70, 140),
+            time: Color::Rgb(80, 80, 80),
             syntect_theme: "InspiredGitHub",
         }
     }
