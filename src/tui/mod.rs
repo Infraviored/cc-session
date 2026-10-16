@@ -19,7 +19,7 @@ use crossterm::terminal::{
 use ratatui::prelude::*;
 
 use crate::clipboard;
-use crate::config::Config;
+use crate::config::{Config, ShellSyntax};
 use crate::discovery::{discover_profiles, load_conversation};
 use crate::filter::filter_sessions;
 use crate::search::{self, SearchResult};
@@ -836,11 +836,23 @@ pub fn run(
         if let (Some(ref cd_path), Some(ref cwd)) = (&cd_file, &deferred_cwd) {
             let _ = std::fs::write(cd_path, cwd);
         }
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-        let status = std::process::Command::new(&shell)
-            .arg("-ic")
-            .arg(&cmd)
-            .status();
+        let status = match app.config.syntax {
+            ShellSyntax::Posix => {
+                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                std::process::Command::new(&shell).arg("-ic").arg(&cmd).status()
+            }
+            // PowerShell 7 if installed, else the Windows PowerShell that
+            // ships with Windows. Its profile is loaded, like `-i` above.
+            ShellSyntax::PowerShell => ["pwsh", "powershell"]
+                .iter()
+                .map(|shell| {
+                    std::process::Command::new(shell)
+                        .args(["-NoLogo", "-Command", &cmd])
+                        .status()
+                })
+                .find(|r| !matches!(r, Err(e) if e.kind() == std::io::ErrorKind::NotFound))
+                .unwrap_or_else(|| Err(std::io::ErrorKind::NotFound.into())),
+        };
         match status {
             Ok(s) => std::process::exit(s.code().unwrap_or(1)),
             Err(e) => {

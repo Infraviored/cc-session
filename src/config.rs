@@ -24,10 +24,31 @@ pub struct LaunchMode {
     pub args: Vec<String>,
 }
 
+/// Which shell the resume command is written for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ShellSyntax {
+    Posix,
+    #[value(name = "powershell")]
+    PowerShell,
+}
+
+impl ShellSyntax {
+    /// PowerShell on Windows, a POSIX shell everywhere else.
+    pub fn native() -> Self {
+        if cfg!(windows) {
+            ShellSyntax::PowerShell
+        } else {
+            ShellSyntax::Posix
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Command that starts Claude Code, run through an interactive shell.
     pub command: String,
+    /// Shell the resume command is written for.
+    pub syntax: ShellSyntax,
     pub profiles: Vec<Profile>,
     pub modes: Vec<LaunchMode>,
     /// Index into `modes` used by Enter.
@@ -73,6 +94,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             command: "claude".to_string(),
+            syntax: ShellSyntax::native(),
             profiles: vec![Profile {
                 name: "default".to_string(),
                 config_dir: crate::discovery::get_claude_home(),
@@ -121,9 +143,10 @@ fn state_path() -> Option<PathBuf> {
 
 /// Expand a leading `~` to the home directory.
 fn expand_home(path: &str) -> PathBuf {
+    let is_sep = |c: char| c == '/' || (cfg!(windows) && c == '\\');
     match path.strip_prefix("~") {
-        Some(rest) if rest.is_empty() || rest.starts_with('/') => dirs::home_dir()
-            .map(|h| h.join(rest.trim_start_matches('/')))
+        Some(rest) if rest.is_empty() || rest.starts_with(is_sep) => dirs::home_dir()
+            .map(|h| h.join(rest.trim_start_matches(is_sep)))
             .unwrap_or_else(|| PathBuf::from(path)),
         _ => PathBuf::from(path),
     }
@@ -258,31 +281,49 @@ impl Config {
     /// Shell command that resumes `session` in its own directory and profile
     /// with `mode`'s extra arguments.
     pub fn resume_command(&self, session: &crate::session::Session, mode: &LaunchMode) -> String {
-        let mut cmd = format!("cd {} && ", shell_quote(&session.cwd));
-        let profile = match self.profile_override {
-            Some(i) => self.profiles.get(i),
-            None => self.profile(&session.profile),
+        let quote = match self.syntax {
+            ShellSyntax::Posix => shell_quote,
+            ShellSyntax::PowerShell => ps_quote,
         };
-        if let Some(profile) = profile {
+        let mut claude = self.command.clone();
+        for arg in &mode.args {
+            claude.push(' ');
+            claude.push_str(&quote(arg));
+        }
+        claude.push_str(" -r ");
+        claude.push_str(&quote(&session.id));
+        let config_dir = {
+            let profile = match self.profile_override {
+                Some(i) => self.profiles.get(i),
+                None => self.profile(&session.profile),
+            };
             // Only name the config dir when it isn't Claude's own default:
             // CLAUDE_CONFIG_DIR=~/.claude makes Claude read ~/.claude/.claude.json
             // instead of ~/.claude.json, i.e. a different profile.
             let default_home = dirs::home_dir().map(|h| h.join(".claude"));
-            if Some(&profile.config_dir) != default_home.as_ref() {
-                cmd.push_str(&format!(
-                    "CLAUDE_CONFIG_DIR={} ",
-                    shell_quote(&profile.config_dir.to_string_lossy())
-                ));
+            profile
+                .filter(|p| Some(&p.config_dir) != default_home.as_ref())
+                .map(|p| quote(&p.config_dir.to_string_lossy()))
+        };
+        let cwd = quote(&session.cwd);
+        match (self.syntax, config_dir) {
+            (ShellSyntax::Posix, None) => format!("cd {cwd} && {claude}"),
+            (ShellSyntax::Posix, Some(dir)) => {
+                format!("cd {cwd} && CLAUDE_CONFIG_DIR={dir} {claude}")
             }
+            // `;` rather than `&&`, which Windows PowerShell 5.1 lacks; the
+            // `-ErrorAction Stop` keeps claude from starting in the wrong
+            // directory. The variable is removed again so it doesn't stick
+            // to the calling shell.
+            (ShellSyntax::PowerShell, None) => {
+                format!("Set-Location -LiteralPath {cwd} -ErrorAction Stop; {claude}")
+            }
+            (ShellSyntax::PowerShell, Some(dir)) => format!(
+                "Set-Location -LiteralPath {cwd} -ErrorAction Stop; \
+                 $env:CLAUDE_CONFIG_DIR = {dir}; \
+                 try {{ {claude} }} finally {{ Remove-Item Env:CLAUDE_CONFIG_DIR }}"
+            ),
         }
-        cmd.push_str(&self.command);
-        for arg in &mode.args {
-            cmd.push(' ');
-            cmd.push_str(&shell_quote(arg));
-        }
-        cmd.push_str(" -r ");
-        cmd.push_str(&shell_quote(&session.id));
-        cmd
     }
 }
 
@@ -316,6 +357,18 @@ pub fn shell_quote(s: &str) -> String {
         s.to_string()
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+/// Single-quote `s` for PowerShell unless it is plainly safe as is.
+pub fn ps_quote(s: &str) -> String {
+    let safe = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./\\:".contains(c));
+    if safe {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "''"))
     }
 }
 
@@ -378,7 +431,7 @@ mod tests {
 
     #[test]
     fn resume_command_sets_profile_dir_and_mode_args() {
-        let c = parse(
+        let mut c = parse(
             r#"
             [[profiles]]
             name = "work"
@@ -400,10 +453,19 @@ mod tests {
             profile: "work".into(),
             file_path: PathBuf::new(),
         };
+        c.syntax = ShellSyntax::Posix;
         assert_eq!(
             c.resume_command(&session, &c.modes[1]),
             "cd '/home/x/my proj' && CLAUDE_CONFIG_DIR='/opt/work claude' claude \
              --dangerously-skip-permissions -r abc"
+        );
+        c.syntax = ShellSyntax::PowerShell;
+        assert_eq!(
+            c.resume_command(&session, &c.modes[1]),
+            "Set-Location -LiteralPath '/home/x/my proj' -ErrorAction Stop; \
+             $env:CLAUDE_CONFIG_DIR = '/opt/work claude'; \
+             try { claude --dangerously-skip-permissions -r abc } \
+             finally { Remove-Item Env:CLAUDE_CONFIG_DIR }"
         );
     }
 
@@ -412,5 +474,13 @@ mod tests {
         assert_eq!(shell_quote("/home/a/b"), "/home/a/b");
         assert_eq!(shell_quote("/home/a b"), "'/home/a b'");
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn ps_quote_quotes_when_needed() {
+        assert_eq!(ps_quote(r"D:\repos\cc-session"), r"D:\repos\cc-session");
+        assert_eq!(ps_quote(r"C:\My Dir"), r"'C:\My Dir'");
+        assert_eq!(ps_quote("it's"), "'it''s'");
+        assert_eq!(ps_quote("$x"), "'$x'");
     }
 }
