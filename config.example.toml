@@ -6,7 +6,7 @@
 command = "claude"
 
 # Launch mode used by Enter / Alt-C until you pick another one with Alt-M
-# (the pick is remembered in ~/.config/cc-session/mode).
+# (the pick is remembered in ~/.config/cc-session/state).
 # mode = "default"
 
 # Claude Code config directories to list sessions from. Without any entry,

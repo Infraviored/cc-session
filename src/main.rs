@@ -87,9 +87,10 @@ enum Shell {
 /// the resume command it wrote, so the `cd` happens in the calling shell and
 /// the command lands in its history.
 fn shell_init(shell: Shell, name: &str) -> String {
+    // `command` keeps the fallback from calling the function itself.
     let exe = std::env::current_exe()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "cc-session".to_string());
+        .map(|p| config::shell_quote(&p.to_string_lossy()))
+        .unwrap_or_else(|_| "command cc-session".to_string());
     let history = match shell {
         Shell::Bash => r#"history -s "$__ccs_cmd""#,
         Shell::Zsh => r#"print -s -- "$__ccs_cmd""#,
@@ -109,7 +110,6 @@ fn shell_init(shell: Shell, name: &str) -> String {
   eval "$__ccs_cmd"
 }}
 "#,
-        exe = config::shell_quote(&exe),
     )
 }
 
@@ -141,6 +141,15 @@ fn main() {
     let cli = Cli::parse();
 
     if let Some(Command::Init { shell, name }) = &cli.command {
+        let valid = !name.is_empty()
+            && !name.starts_with(|c: char| c.is_ascii_digit())
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if !valid {
+            eprintln!("Invalid function name {name:?}: use letters, digits, '_' and '-'");
+            std::process::exit(1);
+        }
         print!("{}", shell_init(*shell, name));
         return;
     }

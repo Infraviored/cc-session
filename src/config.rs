@@ -36,6 +36,9 @@ pub struct Config {
     /// Needed when profiles share one `projects` directory (symlinked), so
     /// the transcript alone can't tell which profile it belongs to.
     pub profile_override: Option<usize>,
+    /// Whether the profiles have more than one distinct `projects` dir.
+    /// Computed once: it is asked for every row of every frame.
+    multi_profile: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -77,6 +80,7 @@ impl Default for Config {
             modes: default_modes(),
             mode: 0,
             profile_override: None,
+            multi_profile: false,
         }
     }
 }
@@ -183,6 +187,7 @@ impl Config {
                 })
                 .collect();
         }
+        config.multi_profile = distinct_projects_dirs(&config.profiles).len() > 1;
         if let Some(name) = raw.mode {
             if !config.select_mode(&name) {
                 return Err(format!("mode {name:?} is not defined in [[modes]]"));
@@ -236,7 +241,7 @@ impl Config {
     /// Whether sessions come from more than one place (then the list shows
     /// which profile each was found in).
     pub fn multi_profile(&self) -> bool {
-        distinct_projects_dirs(&self.profiles).len() > 1
+        self.multi_profile
     }
 
     /// Name shown for the profile choice: the override, or "auto".
@@ -276,7 +281,7 @@ impl Config {
             cmd.push_str(&shell_quote(arg));
         }
         cmd.push_str(" -r ");
-        cmd.push_str(&session.id);
+        cmd.push_str(&shell_quote(&session.id));
         cmd
     }
 }

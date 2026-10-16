@@ -714,7 +714,11 @@ pub fn run(
 
         if last_refresh.elapsed() >= REFRESH_INTERVAL {
             last_refresh = Instant::now();
-            if app.mode == Mode::Browsing {
+            // refresh_sessions drops the result during a content search, so
+            // don't rescan then.
+            if app.mode == Mode::Browsing
+                && app.content_search_state != ContentSearchState::Searching
+            {
                 app.refresh_sessions(discover_profiles(&app.config.profiles));
             }
         }

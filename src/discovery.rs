@@ -156,7 +156,10 @@ pub fn session_title(path: &Path) -> Option<String> {
 
     let name = scan.custom.clone().or(scan.agent.clone()).or(scan.ai.clone());
     if let Ok(mut c) = cache.lock() {
-        c.insert(path.to_path_buf(), scan);
+        // Two scans of one file can race; keep the one that got further.
+        if c.get(path).map_or(true, |old| old.offset <= scan.offset) {
+            c.insert(path.to_path_buf(), scan);
+        }
     }
     name
 }
@@ -249,18 +252,32 @@ fn parse_session_file(path: &Path) -> Option<Session> {
 /// path and only later ones carry the new one. Falls back to the last `cwd` in
 /// the file that exists, then to the directory the transcript's project folder
 /// name decodes to. Returns `first` unchanged if nothing better turns up.
+///
+/// The fallbacks read the whole transcript and walk the filesystem, so their
+/// result is cached per transcript for the rest of the run -- the periodic
+/// refresh would otherwise repeat them every few seconds.
 pub fn resolve_cwd(path: &Path, first: String) -> String {
     if first.is_empty() || Path::new(&first).is_dir() {
         return first;
     }
-    if let Some(found) = last_existing_cwd(path, &first) {
+    static CACHE: OnceLock<Mutex<HashMap<(PathBuf, String), String>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let key = (path.to_path_buf(), first);
+    if let Some(found) = cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
         return found;
     }
-    path.parent()
-        .and_then(|d| d.file_name())
-        .and_then(|n| n.to_str())
-        .and_then(decode_project_dir)
-        .unwrap_or(first)
+    let found = last_existing_cwd(path, &key.1)
+        .or_else(|| {
+            path.parent()
+                .and_then(|d| d.file_name())
+                .and_then(|n| n.to_str())
+                .and_then(decode_project_dir)
+        })
+        .unwrap_or_else(|| key.1.clone());
+    if let Ok(mut c) = cache.lock() {
+        c.insert(key, found.clone());
+    }
+    found
 }
 
 /// Scan every line for a `"cwd":"..."` value and return the last one (other

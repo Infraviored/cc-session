@@ -223,16 +223,24 @@ fn render_session_list(frame: &mut Frame, app: &App, area: Rect) {
                     lines.push(line);
                 }
 
-                if !session.last_assistant_line.is_empty() {
+                // Same test as App::item_height, or scrolling miscounts rows.
+                if !session.last_assistant_line.trim().is_empty() {
                     let indent = " ".repeat(cursor_len + 2);
                     let reply_prefix = "\u{21B3} ";
                     let reply_max = width
                         .saturating_sub(indent.chars().count() + reply_prefix.chars().count());
                     let reply_text = truncate_str(&session.last_assistant_line, reply_max);
+                    // Padded to full width so the selection bar covers the row.
+                    let pad = width.saturating_sub(
+                        indent.chars().count()
+                            + reply_prefix.chars().count()
+                            + reply_text.chars().count(),
+                    );
                     let reply_line = Line::from(vec![
                         Span::raw(indent),
                         Span::styled(reply_prefix, dim),
                         Span::styled(reply_text, dim),
+                        Span::raw(" ".repeat(pad)),
                     ]);
                     if is_selected {
                         lines.push(reply_line.patch_style(Style::default().bg(app.theme.selected_bg)));
