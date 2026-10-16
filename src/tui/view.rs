@@ -128,7 +128,7 @@ fn render_session_list(frame: &mut Frame, app: &App, area: Rect) {
     let column_width = |len: fn(&crate::session::Session) -> usize, cap: usize| {
         app.sessions.iter().map(len).max().unwrap_or(0).min(cap)
     };
-    let project_width = column_width(|s| s.project_name.chars().count(), (width / 6).max(8));
+    let project_width = column_width(|s| s.project_name.chars().count(), (width / 9).clamp(8, 20));
     let profile_width = column_width(|s| s.profile.chars().count(), 12);
     // "4 minutes ago", "a few seconds ago" etc. -- right-aligned in a fixed slot.
     const TIME_WIDTH: usize = 14;
@@ -144,7 +144,7 @@ fn render_session_list(frame: &mut Frame, app: &App, area: Rect) {
                 let delta = Utc::now().signed_duration_since(session.timestamp);
                 let time_ago = time_ago_text(delta);
                 // Right side: name (green), profile (violet, only with several
-                // profiles), project (blue column), time (dim, right-aligned).
+                // profiles), project (blue column), time (right-aligned).
                 let mut right: Vec<Span> = Vec::new();
                 if let Some(n) = session.name.as_deref() {
                     // Capped so a long title never crowds out the message.
@@ -171,7 +171,7 @@ fn render_session_list(frame: &mut Frame, app: &App, area: Rect) {
                 }
                 right.push(Span::styled(
                     format!("{time_ago:>TIME_WIDTH$}"),
-                    Style::default().fg(app.theme.text_dim),
+                    Style::default().fg(app.theme.time),
                 ));
                 let right_len: usize = right.iter().map(|s| s.content.chars().count()).sum();
 
