@@ -3,13 +3,26 @@ use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::{Action, App, ContentSearchState, DisplayItem, Mode};
+use crate::session::Session;
+
+use super::{Action, App, ContentSearchState, DisplayItem, MenuRow, Mode};
 
 /// Handle a key event and return the resulting action.
 pub fn handle_input(app: &mut App, key: KeyEvent) -> Action {
     // Ctrl-C always quits
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return Action::Quit;
+    }
+
+    if app.mode_menu.is_some() {
+        return handle_mode_menu(app, key);
+    }
+
+    // Alt-M opens the launch-mode menu, from the list or the conversation.
+    if key.code == KeyCode::Char('m') && key.modifiers.contains(KeyModifiers::ALT) {
+        app.mode_menu = Some(app.config.mode);
+        app.menu_launch = None;
+        return Action::Continue;
     }
 
     match app.mode {
@@ -30,6 +43,20 @@ fn handle_browse(app: &mut App, key: KeyEvent) -> Action {
         return Action::Continue;
     }
 
+    // Alt-C resumes the selected session directly from the list, without
+    // going through the conversation detail view first. Plain 'c' is
+    // reserved for the live filter (typing searches), so this needs a
+    // modifier -- same reasoning as Alt-G above.
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::ALT) {
+        if let Some(DisplayItem::Session(entry)) = app.display_items.get(app.selected) {
+            let session = app.display_session(entry);
+            let cmd = app.resume_command(session);
+            let cwd = session.cwd.clone();
+            return Action::ExecCommand { cmd, cwd };
+        }
+        return Action::Continue;
+    }
+
     match key.code {
         KeyCode::Esc => {
             if !app.filter_query.is_empty() || app.filter_active {
@@ -47,6 +74,13 @@ fn handle_browse(app: &mut App, key: KeyEvent) -> Action {
                 // Second Escape (filter already empty): quit
                 Action::Quit
             }
+        }
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
+            if let Some(DisplayItem::Session(entry)) = app.display_items.get(app.selected) {
+                let session = app.display_session(entry).clone();
+                open_launch_menu(app, session);
+            }
+            Action::Continue
         }
         KeyCode::Enter => {
             if app.selected < app.display_items.len() {
@@ -253,10 +287,12 @@ fn handle_conversation(app: &mut App, key: KeyEvent) -> Action {
         }
         KeyCode::Enter => {
             if let Some(conv) = &app.conversation {
-                let cmd = conv.session.resume_command();
                 if key.modifiers.contains(KeyModifiers::ALT) {
-                    Action::CopyCommand(cmd)
+                    let session = conv.session.clone();
+                    open_launch_menu(app, session);
+                    Action::Continue
                 } else {
+                    let cmd = app.resume_command(&conv.session);
                     let cwd = conv.session.cwd.clone();
                     Action::ExecCommand { cmd, cwd }
                 }
@@ -264,8 +300,76 @@ fn handle_conversation(app: &mut App, key: KeyEvent) -> Action {
                 Action::Continue
             }
         }
+        KeyCode::Char('y') => match &app.conversation {
+            Some(conv) => Action::CopyCommand(app.resume_command(&conv.session)),
+            None => Action::Continue,
+        },
         _ => Action::Continue,
     }
+}
+
+/// Keys while the launch menu is open: move, Enter to pick the highlighted
+/// row and close, Space or a number to pick and stay, Esc to close. Picks
+/// are remembered for the next start.
+fn handle_mode_menu(app: &mut App, key: KeyEvent) -> Action {
+    let Some(sel) = app.mode_menu else {
+        return Action::Continue;
+    };
+    let rows = app.menu_rows();
+    let count = rows.len();
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => close_menu(app),
+        KeyCode::Char('m') if key.modifiers.contains(KeyModifiers::ALT) => close_menu(app),
+        KeyCode::Up | KeyCode::Char('k') => app.mode_menu = Some((sel + count - 1) % count),
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+            app.mode_menu = Some((sel + 1) % count)
+        }
+        KeyCode::Char(c @ '1'..='9') if (c as usize - '1' as usize) < count => {
+            let idx = c as usize - '1' as usize;
+            app.mode_menu = Some(idx);
+            pick_row(app, rows[idx]);
+        }
+        KeyCode::Char(' ') => pick_row(app, rows[sel]),
+        KeyCode::Enter => {
+            pick_row(app, rows[sel]);
+            if let Some(session) = app.menu_launch.take() {
+                app.mode_menu = None;
+                let cmd = app.resume_command(&session);
+                return Action::ExecCommand { cmd, cwd: session.cwd };
+            }
+            app.mode_menu = None;
+        }
+        _ => {}
+    }
+    Action::Continue
+}
+
+/// Open the menu for resuming `session`: Enter picks the highlighted row
+/// and resumes with the resulting mode and profile.
+fn open_launch_menu(app: &mut App, session: Session) {
+    app.mode_menu = Some(app.config.mode);
+    app.menu_launch = Some(session);
+}
+
+fn close_menu(app: &mut App) {
+    app.mode_menu = None;
+    app.menu_launch = None;
+}
+
+fn pick_row(app: &mut App, row: MenuRow) {
+    match row {
+        MenuRow::Mode(i) => app.config.mode = i,
+        MenuRow::Profile(p) => app.config.profile_override = p,
+    }
+    app.config.save_state();
+    app.status_message = Some((
+        format!(
+            "Resume with: {} \u{00B7} profile {}",
+            app.config.current_mode().name,
+            app.config.profile_label()
+        ),
+        Instant::now(),
+    ));
 }
 
 fn handle_conversation_search(app: &mut App, key: KeyEvent) -> Action {

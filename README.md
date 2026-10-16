@@ -61,26 +61,26 @@ cc-session --last 20
 cc-session --light
 ```
 
-## Stay in the project directory after exit
+## Resume in your own shell
 
-By default, after resuming a session and exiting Claude Code, your shell returns to the directory where you launched cc-session. To stay in the session's project directory instead, add this shell wrapper to your `~/.zshrc` or `~/.bashrc`:
+By default cc-session runs the resume command in a child shell, so when Claude Code exits you are back where you started. To resume in your current shell instead (a real `cd` into the project, and the command in your shell history), add this to `~/.bashrc` or `~/.zshrc`:
 
 ```bash
-ccs() {
-  local tmp=$(mktemp)
-  cc-session --cd-file "$tmp" "$@"
-  local dir
-  dir=$(cat "$tmp" 2>/dev/null)
-  rm -f "$tmp"
-  if [ -n "$dir" ] && [ -d "$dir" ]; then
-    cd "$dir" || return
-  fi
-}
+eval "$(cc-session init bash)"   # or: init zsh
 ```
 
-Then use `ccs` instead of `cc-session`. When you select a session with Enter, resume Claude, and then exit, your shell will be in the project directory.
+This defines a `cc-session` shell function (pass `--name ccs` to `init` for another name) that prints the command and runs it with `eval`.
 
-If you quit without selecting a session (Esc), no directory change happens.
+## Launch modes and profiles
+
+Press **Alt-M** to choose how sessions are resumed. Enter (in the conversation view) and Alt-C (in the list) use the choice, which is remembered in `~/.config/cc-session/state`. Alt-Enter (in either view) opens the same menu for the selected session; Enter there picks the highlighted row and resumes.
+
+- **Mode**: extra arguments for `claude`. Defaults: `default` (none) and `skip permissions` (`--dangerously-skip-permissions`). Start with `cc-session --dangerously-skip-permissions` or `--mode <name>` to preselect one.
+- **Profile**: which Claude config directory to resume in. `auto` uses the one the session was found in; non-default directories are passed as `CLAUDE_CONFIG_DIR`.
+
+Profiles and modes are set in `~/.config/cc-session/config.toml`; see [`config.example.toml`](config.example.toml). With several profiles, cc-session lists the sessions of all of them. Profiles that share one `projects` directory (symlinked) are scanned once, so pick the profile in Alt-M.
+
+The list shows each session's name on the right: the `/rename` title, else the Remote Control agent name, else Claude's generated title.
 
 ## Usage
 
@@ -110,7 +110,7 @@ Features:
 - **Auto-scroll**: When entering from a search, the viewer auto-scrolls to center the first match on screen
 - **Theme-aware**: Colors adapt to dark or light terminal backgrounds
 
-Navigation: `Space`/`PageDown` page down, `b`/`PageUp` page up, `g` top, `G` bottom, arrows for line-by-line scrolling. Press `Enter` to copy the resume command and exit, `Esc` to return to the session list.
+Navigation: `Space`/`PageDown` page down, `b`/`PageUp` page up, `g` top, `G` bottom, arrows for line-by-line scrolling. Press `Enter` to resume, `Alt-Enter` to pick mode and profile first, `y` to copy the resume command and exit, `Esc` to return to the session list.
 
 ### Time filters
 
@@ -133,6 +133,9 @@ cc-session --since 7d --last 10  # both constraints
 | `Backspace` | Delete last filter character |
 | `Left` / `Right` | Move cursor within filter text |
 | `Enter` | Open conversation viewer (on session) / toggle group (on header) |
+| `Alt-C` | Resume selected session directly |
+| `Alt-Enter` | Pick mode/profile in the launch menu, Enter there resumes |
+| `Alt-M` | Launch menu: mode and profile to resume with |
 | `Alt-G` | Toggle project grouping view |
 | Mouse click | Select item (first click), open/toggle (second click) |
 | `Esc` | Clear filter (first), quit (second) |
@@ -149,8 +152,10 @@ cc-session --since 7d --last 10  # both constraints
 | `Down` / `Up` | Scroll down / up one line |
 | `/` | Search within conversation |
 | `n` / `N` | Jump to next / previous match |
-| `Enter` | Resume session (exec into Claude Code) |
-| `Alt+Enter` | Copy resume command to clipboard and exit |
+| `Enter` | Resume session with the current launch mode and profile |
+| `Alt-Enter` | Pick mode/profile in the launch menu, Enter there resumes |
+| `Alt-M` | Launch menu: mode and profile to resume with |
+| `y` | Copy resume command to clipboard and exit |
 | `Esc` | Clear search (first), back to list (second) |
 
 ## How it works

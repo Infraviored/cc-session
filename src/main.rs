@@ -1,4 +1,5 @@
 mod clipboard;
+mod config;
 mod discovery;
 mod filter;
 mod search;
@@ -6,9 +7,12 @@ mod session;
 mod theme;
 mod tui;
 
-use clap::Parser;
+use std::path::PathBuf;
 
-use discovery::{apply_filters, discover_sessions, get_claude_home};
+use clap::{Parser, Subcommand, ValueEnum};
+
+use config::Config;
+use discovery::{apply_filters, discover_profiles};
 
 /// Fast CLI tool for finding and resuming Claude Code sessions.
 #[derive(Parser, Debug)]
@@ -34,9 +38,79 @@ struct Cli {
     #[arg(long = "dark", conflicts_with = "light")]
     dark: bool,
 
+    /// Config file (default: ~/.config/cc-session/config.toml)
+    #[arg(long)]
+    config: Option<PathBuf>,
+
+    /// Launch mode to resume with, by name (switch inside with Alt-M)
+    #[arg(long)]
+    mode: Option<String>,
+
+    /// Resume with --dangerously-skip-permissions (selects the launch mode
+    /// that passes it)
+    #[arg(long = "dangerously-skip-permissions")]
+    skip_permissions: bool,
+
     /// Write session directory to this file on exec (for shell wrapper cd-on-quit)
     #[arg(long = "cd-file", hide = true)]
     cd_file: Option<String>,
+
+    /// Write the resume command to this file instead of running it (used by
+    /// the shell function from `cc-session init`)
+    #[arg(long = "exec-file", hide = true)]
+    exec_file: Option<String>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Print a shell function that resumes sessions in your current shell,
+    /// so it really changes into the session's directory. Add to your rc file:
+    /// eval "$(cc-session init bash)"
+    Init {
+        shell: Shell,
+        /// Name of the shell function
+        #[arg(long, default_value = "cc-session")]
+        name: String,
+    },
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug)]
+enum Shell {
+    Bash,
+    Zsh,
+}
+
+/// Shell function that runs cc-session with `--exec-file` and then `eval`s
+/// the resume command it wrote, so the `cd` happens in the calling shell and
+/// the command lands in its history.
+fn shell_init(shell: Shell, name: &str) -> String {
+    // `command` keeps the fallback from calling the function itself.
+    let exe = std::env::current_exe()
+        .map(|p| config::shell_quote(&p.to_string_lossy()))
+        .unwrap_or_else(|_| "command cc-session".to_string());
+    let history = match shell {
+        Shell::Bash => r#"history -s "$__ccs_cmd""#,
+        Shell::Zsh => r#"print -s -- "$__ccs_cmd""#,
+    };
+    format!(
+        r#"unalias {name} 2>/dev/null
+{name}() {{
+  local __ccs_file __ccs_cmd __ccs_rc
+  __ccs_file=$(mktemp) || return
+  {exe} --exec-file "$__ccs_file" "$@"
+  __ccs_rc=$?
+  __ccs_cmd=$(cat "$__ccs_file")
+  rm -f "$__ccs_file"
+  [ -n "$__ccs_cmd" ] || return $__ccs_rc
+  printf '%s\n' "$__ccs_cmd"
+  {history}
+  eval "$__ccs_cmd"
+}}
+"#,
+    )
 }
 
 /// Parse a human-friendly duration string into a chrono::Duration.
@@ -66,18 +140,46 @@ fn parse_duration(s: &str) -> Result<chrono::Duration, String> {
 fn main() {
     let cli = Cli::parse();
 
-    let claude_home = get_claude_home();
-    let projects_dir = claude_home.join("projects");
+    if let Some(Command::Init { shell, name }) = &cli.command {
+        let valid = !name.is_empty()
+            && !name.starts_with(|c: char| c.is_ascii_digit())
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if !valid {
+            eprintln!("Invalid function name {name:?}: use letters, digits, '_' and '-'");
+            std::process::exit(1);
+        }
+        print!("{}", shell_init(*shell, name));
+        return;
+    }
 
-    if !projects_dir.is_dir() {
-        eprintln!(
-            "No Claude projects directory found at {}",
-            projects_dir.display()
-        );
+    let mut config = Config::load(cli.config.as_deref()).unwrap_or_else(|e| {
+        eprintln!("Invalid config: {e}");
+        std::process::exit(1);
+    });
+    if let Some(name) = &cli.mode {
+        if !config.select_mode(name) {
+            let names: Vec<&str> = config.modes.iter().map(|m| m.name.as_str()).collect();
+            eprintln!("Unknown mode {name:?} (available: {})", names.join(", "));
+            std::process::exit(1);
+        }
+    }
+    if cli.skip_permissions {
+        config.select_mode_with_arg(config::SKIP_PERMISSIONS);
+    }
+
+    if !config.profiles.iter().any(|p| p.config_dir.join("projects").is_dir()) {
+        for p in &config.profiles {
+            eprintln!(
+                "No Claude projects directory found at {}",
+                p.config_dir.join("projects").display()
+            );
+        }
         std::process::exit(2);
     }
 
-    let sessions = discover_sessions(&claude_home);
+    let sessions = discover_profiles(&config.profiles);
 
     // Apply --since filter
     let since_duration = cli.since.map(|s| {
@@ -99,7 +201,7 @@ fn main() {
     };
 
     // Interactive TUI
-    if let Err(e) = tui::run(sessions, theme, cli.cd_file) {
+    if let Err(e) = tui::run(sessions, theme, config, cli.cd_file, cli.exec_file) {
         eprintln!("TUI error: {e}");
         std::process::exit(1);
     }

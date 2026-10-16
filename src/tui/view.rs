@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientatio
 use crate::session::{ConversationMessage, MessageRole};
 
 use super::table;
-use super::{App, ContentSearchState, DisplayItem, MatchType, Mode};
+use super::{App, ContentSearchState, DisplayItem, MatchType, MenuRow, Mode};
 
 /// Render the full TUI frame.
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -25,20 +25,102 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     render_session_list(frame, app, chunks[0]);
     render_status_bar(frame, app, chunks[1]);
+    render_mode_menu(frame, app, area);
+}
+
+/// Launch menu (Alt-M): a small box in the bottom-left corner, above the
+/// status bar, listing launch modes and (with several) profiles.
+fn render_mode_menu(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(selected) = app.mode_menu else {
+        return;
+    };
+    let dim = Style::default().fg(app.theme.text_dim);
+    let heading = Style::default().fg(app.theme.heading).bold();
+    let rows = app.menu_rows();
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled(" mode", heading))];
+    for (i, &row) in rows.iter().enumerate() {
+        if row == MenuRow::Profile(None) {
+            lines.push(Line::from(Span::styled(" profile", heading)));
+        }
+        let (name, detail) = match row {
+            MenuRow::Mode(m) => {
+                let mode = &app.config.modes[m];
+                let args = if mode.args.is_empty() {
+                    "(no extra arguments)".to_string()
+                } else {
+                    mode.args.join(" ")
+                };
+                (mode.name.clone(), args)
+            }
+            MenuRow::Profile(None) => (
+                "auto".to_string(),
+                "profile the session was found in".to_string(),
+            ),
+            MenuRow::Profile(Some(p)) => {
+                let profile = &app.config.profiles[p];
+                (profile.name.clone(), profile.config_dir.display().to_string())
+            }
+        };
+        let marker = if app.menu_row_active(row) { "\u{25CF}" } else { " " };
+        let number = if i < 9 { format!("{}", i + 1) } else { " ".to_string() };
+        let line = Line::from(vec![
+            Span::styled(format!(" {number} {marker} "), dim),
+            Span::styled(format!("{name:<18}"), Style::default().fg(app.theme.text)),
+            Span::styled(format!("{detail} "), dim),
+        ]);
+        lines.push(if i == selected {
+            line.patch_style(Style::default().bg(app.theme.selected_bg))
+        } else {
+            line
+        });
+    }
+    let hint = if app.menu_launch.is_some() {
+        " \u{2191}\u{2193} move  Space/1-9 pick  Enter pick+resume  Esc cancel "
+    } else {
+        " \u{2191}\u{2193} move  Enter pick  Space/1-9 pick+stay  Esc close "
+    };
+    lines.push(Line::from(Span::styled(hint, dim)));
+
+    let content_width = lines.iter().map(|l| l.width()).max().unwrap_or(0) as u16;
+    let width = (content_width + 2).min(area.width);
+    let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(1));
+    let rect = Rect {
+        x: area.x,
+        y: area.bottom().saturating_sub(height + 1),
+        width,
+        height,
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.heading))
+        .title(match &app.menu_launch {
+            Some(session) => format!(
+                " resume {} ",
+                truncate_str(session.name.as_deref().unwrap_or(&session.project_name), 40)
+            ),
+            None => format!(" resume with \u{00B7} {} ", app.config.command),
+        });
+    frame.render_widget(ratatui::widgets::Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .style(Style::default().bg(app.theme.status_bar_bg)),
+        rect,
+    );
 }
 
 /// Render the session list with single-line entries.
 fn render_session_list(frame: &mut Frame, app: &App, area: Rect) {
     let width = area.width.saturating_sub(2) as usize; // account for left/right borders
     let height = area.height as usize;
-    let visible_items = height.saturating_sub(2); // account for top/bottom borders
+    let visible_lines = height.saturating_sub(2); // account for top/bottom borders
     let mut lines: Vec<Line> = Vec::new();
 
     let terms = search_terms(app);
     let term_refs: Vec<&str> = terms.iter().map(|s| s.as_str()).collect();
 
     let start = app.scroll_offset;
-    let end = (start + visible_items).min(app.display_items.len());
+    let (_, end) = app.visible_range(start, visible_lines);
 
     for i in start..end {
         let item = &app.display_items[i];
@@ -50,12 +132,22 @@ fn render_session_list(frame: &mut Frame, app: &App, area: Rect) {
 
                 let delta = Utc::now().signed_duration_since(session.timestamp);
                 let time_ago = HumanTime::from(-delta).to_text_en(Accuracy::Rough, Tense::Past);
-                let right = if app.grouped_mode {
+                let mut right = if app.grouped_mode {
                     time_ago.clone()
                 } else {
                     format!("{}  {}", session.project_name, time_ago)
                 };
-                let right_len = right.len();
+                if app.config.multi_profile() {
+                    right = format!("{}  {}", session.profile, right);
+                }
+                // Session name in front of the dim metadata, capped so a long
+                // title never crowds out the message itself.
+                let name = session
+                    .name
+                    .as_deref()
+                    .map(|n| format!("{}  ", truncate_str(n, (width / 4).clamp(12, 40))))
+                    .unwrap_or_default();
+                let right_len = right.chars().count() + name.chars().count();
 
                 // In grouped mode, indent session rows under their header
                 let (cursor, cursor_len) = if app.grouped_mode {
@@ -118,6 +210,9 @@ fn render_session_list(frame: &mut Frame, app: &App, area: Rect) {
                     spans.push(Span::raw(padding));
                 };
 
+                if !name.is_empty() {
+                    spans.push(Span::styled(name, Style::default().fg(app.theme.heading)));
+                }
                 spans.push(Span::styled(right, dim));
 
                 let line = Line::from(spans);
@@ -126,6 +221,32 @@ fn render_session_list(frame: &mut Frame, app: &App, area: Rect) {
                     lines.push(line.patch_style(Style::default().bg(app.theme.selected_bg)));
                 } else {
                     lines.push(line);
+                }
+
+                // Same test as App::item_height, or scrolling miscounts rows.
+                if !session.last_assistant_line.trim().is_empty() {
+                    let indent = " ".repeat(cursor_len + 2);
+                    let reply_prefix = "\u{21B3} ";
+                    let reply_max = width
+                        .saturating_sub(indent.chars().count() + reply_prefix.chars().count());
+                    let reply_text = truncate_str(&session.last_assistant_line, reply_max);
+                    // Padded to full width so the selection bar covers the row.
+                    let pad = width.saturating_sub(
+                        indent.chars().count()
+                            + reply_prefix.chars().count()
+                            + reply_text.chars().count(),
+                    );
+                    let reply_line = Line::from(vec![
+                        Span::raw(indent),
+                        Span::styled(reply_prefix, dim),
+                        Span::styled(reply_text, dim),
+                        Span::raw(" ".repeat(pad)),
+                    ]);
+                    if is_selected {
+                        lines.push(reply_line.patch_style(Style::default().bg(app.theme.selected_bg)));
+                    } else {
+                        lines.push(reply_line);
+                    }
                 }
             }
             DisplayItem::Header(group) => {
@@ -386,6 +507,7 @@ fn render_conversation(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     render_conversation_status(frame, app, status_area);
+    render_mode_menu(frame, app, area);
 }
 
 /// Render the conversation viewer status bar.
@@ -452,7 +574,7 @@ fn render_conversation_status(frame: &mut Frame, app: &App, area: Rect) {
                 Span::styled(format!(" {} ", project_label), Style::default().fg(Color::Green).bold()),
                 Span::styled(format!(" {} ", conv.search_query), cyan),
                 Span::raw(" "),
-                Span::styled("n/N next/prev  / search  Esc clear  Enter resume  ⌥Enter copy", dim),
+                Span::styled("n/N next/prev  / search  Esc clear  Enter resume  ⌥Enter choose+resume  y copy", dim),
             ])
         } else if !conv.initial_search_terms.is_empty() {
             let project_label = format_project_label(&conv.session);
@@ -462,7 +584,7 @@ fn render_conversation_status(frame: &mut Frame, app: &App, area: Rect) {
                 Span::styled(format!(" {} ", project_label), Style::default().fg(Color::Green).bold()),
                 Span::styled(format!(" {} ", filter_text), cyan),
                 Span::raw(" "),
-                Span::styled("n/N next/prev  / search  Esc clear  Enter resume  ⌥Enter copy", dim),
+                Span::styled("n/N next/prev  / search  Esc clear  Enter resume  ⌥Enter choose+resume  y copy", dim),
             ])
         } else {
             let project_label = format_project_label(&conv.session);
@@ -473,7 +595,7 @@ fn render_conversation_status(frame: &mut Frame, app: &App, area: Rect) {
                 ),
                 Span::raw(" "),
                 Span::styled(
-                    "Space/b scroll  g/G top/bottom  / search  Enter resume  ⌥Enter copy  Esc back",
+                    "Space/b scroll  g/G top/bottom  / search  Enter resume  ⌥Enter choose+resume  y copy  Esc back",
                     dim,
                 ),
             ])
@@ -857,8 +979,28 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 ])
             } else {
                 Line::from(vec![
-                    Span::styled(" Enter ", dim),
+                    Span::styled(" ⌥M ", dim),
+                    Span::styled(
+                        if app.config.profiles.len() > 1 {
+                            format!(
+                                "{} \u{00B7} {}",
+                                app.config.current_mode().name,
+                                app.config.profile_label()
+                            )
+                        } else {
+                            app.config.current_mode().name.clone()
+                        },
+                        Style::default().fg(app.theme.heading),
+                    ),
+                    Span::raw("  "),
+                    Span::styled("Enter ", dim),
                     Span::styled("detail", dim),
+                    Span::raw("  "),
+                    Span::styled("⌥C ", dim),
+                    Span::styled("continue", dim),
+                    Span::raw("  "),
+                    Span::styled("⌥Enter ", dim),
+                    Span::styled("choose+resume", dim),
                     Span::raw("  "),
                     Span::styled("⌥G ", dim),
                     Span::styled("group", dim),
@@ -1212,11 +1354,16 @@ fn search_terms(app: &App) -> Vec<String> {
     crate::filter::parse_keywords(&app.filter_query)
 }
 
-/// Format project label as "project_name (branch)" for the conversation status bar.
+/// Format project label as "name · project_name (branch)" for the
+/// conversation status bar.
 fn format_project_label(session: &crate::session::Session) -> String {
-    match &session.git_branch {
+    let project = match &session.git_branch {
         Some(branch) if !branch.is_empty() => format!("{} ({})", session.project_name, branch),
         _ => session.project_name.clone(),
+    };
+    match &session.name {
+        Some(name) => format!("{name} \u{00B7} {project}"),
+        None => project,
     }
 }
 

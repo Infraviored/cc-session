@@ -1,0 +1,33 @@
+# cc-session configuration. Copy to ~/.config/cc-session/config.toml
+# (or $XDG_CONFIG_HOME/cc-session/config.toml). Every key is optional.
+
+# Command that starts Claude Code. It runs through your interactive shell,
+# so aliases apply; use "command claude" to bypass a `claude` alias.
+command = "claude"
+
+# Launch mode used by Enter / Alt-C until you pick another one with Alt-M
+# (the pick is remembered in ~/.config/cc-session/state).
+# mode = "default"
+
+# Claude Code config directories to list sessions from. Without any entry,
+# cc-session uses $CLAUDE_HOME, $CLAUDE_CONFIG_DIR or ~/.claude.
+# Sessions from a directory other than ~/.claude are resumed with
+# CLAUDE_CONFIG_DIR set to it.
+#
+# [[profiles]]
+# name = "private"
+# config_dir = "~/.claude"
+#
+# [[profiles]]
+# name = "work"
+# config_dir = "~/.claude-work"
+
+# Launch modes: extra arguments passed to claude when resuming. Without any
+# entry, these two are used.
+[[modes]]
+name = "default"
+args = []
+
+[[modes]]
+name = "skip permissions"
+args = ["--dangerously-skip-permissions"]
