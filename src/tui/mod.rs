@@ -11,7 +11,9 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, MouseEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -731,7 +733,9 @@ pub fn run(
 
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
-                Event::Key(key) => {
+                // Windows reports key releases too; acting on them moved the
+                // selection twice per keystroke.
+                Event::Key(key) if key.kind != KeyEventKind::Release => {
                     match handle_input(&mut app, key) {
                         Action::Quit => break,
                         Action::EnterConversation(idx) => {

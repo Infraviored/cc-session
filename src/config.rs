@@ -303,12 +303,13 @@ impl Config {
             let default_home = dirs::home_dir().map(|h| h.join(".claude"));
             profile
                 .filter(|p| Some(&p.config_dir) != default_home.as_ref())
-                .map(|p| quote(&p.config_dir.to_string_lossy()))
+                .map(|p| p.config_dir.to_string_lossy().into_owned())
         };
         let cwd = quote(&session.cwd);
         match (self.syntax, config_dir) {
             (ShellSyntax::Posix, None) => format!("cd {cwd} && {claude}"),
             (ShellSyntax::Posix, Some(dir)) => {
+                let dir = shell_quote(&dir);
                 format!("cd {cwd} && CLAUDE_CONFIG_DIR={dir} {claude}")
             }
             // `;` rather than `&&`, which Windows PowerShell 5.1 lacks; the
@@ -318,10 +319,14 @@ impl Config {
             (ShellSyntax::PowerShell, None) => {
                 format!("Set-Location -LiteralPath {cwd} -ErrorAction Stop; {claude}")
             }
+            // The value is always quoted: on the right of `=`, a bare path
+            // would be run as a command instead of assigned.
             (ShellSyntax::PowerShell, Some(dir)) => format!(
                 "Set-Location -LiteralPath {cwd} -ErrorAction Stop; \
-                 $env:CLAUDE_CONFIG_DIR = {dir}; \
-                 try {{ {claude} }} finally {{ Remove-Item Env:CLAUDE_CONFIG_DIR }}"
+                 $env:CLAUDE_CONFIG_DIR = '{}'; \
+                 try {{ {claude} }} finally {{ \
+                 Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue }}",
+                dir.replace('\'', "''")
             ),
         }
     }
@@ -465,8 +470,14 @@ mod tests {
             "Set-Location -LiteralPath '/home/x/my proj' -ErrorAction Stop; \
              $env:CLAUDE_CONFIG_DIR = '/opt/work claude'; \
              try { claude --dangerously-skip-permissions -r abc } \
-             finally { Remove-Item Env:CLAUDE_CONFIG_DIR }"
+             finally { Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue }"
         );
+        // A path that needs no quoting as an argument still gets quoted as
+        // the value of the assignment.
+        c.profiles[0].config_dir = PathBuf::from(r"C:\Users\x\.claude-business");
+        assert!(c
+            .resume_command(&session, &c.modes[0])
+            .contains(r"$env:CLAUDE_CONFIG_DIR = 'C:\Users\x\.claude-business';"));
     }
 
     #[test]
