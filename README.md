@@ -80,6 +80,8 @@ Press **Alt-M** to choose how sessions are resumed. Enter (in the conversation v
 
 Profiles and modes are set in `~/.config/cc-session/config.toml`; see [`config.example.toml`](config.example.toml). With several profiles, cc-session lists the sessions of all of them. Profiles that share one `projects` directory (symlinked) are scanned once, so pick the profile in Alt-M.
 
+The list shows each session's name on the right: the `/rename` title, else the Remote Control agent name, else Claude's generated title.
+
 ### Resuming in a sandbox (xclaude)
 
 A mode can run its own command instead of `claude`, e.g. the sandbox launcher `xclaude` (claude-in-a-box). Run cc-session on the host; the mode resumes each session in a fresh container that mounts the session's directory:
@@ -94,8 +96,6 @@ pass_profile = false
 This runs `cd <session dir> && xclaude -r <id>`. `pass_profile = false` leaves out `CLAUDE_CONFIG_DIR`, so the xclaude build decides which Claude account the container uses (upstream: `~/.claude`). The profile choice in Alt-M is then shown as unused. The container saves transcripts in the host's `~/.claude/projects`, so a session started under another profile continues there unless the `projects` directories are shared. `--dangerously-skip-permissions` on the command line never selects a mode with its own command. xclaude refuses a home directory as a whole and paths outside `/home/*/*`, so sessions started there can't be resumed this way.
 
 Inside an xclaude container, cc-session lists the host's sessions too, but only the mounted directories can be resumed. For any other session, it prints the command to run on the host instead of failing on `cd`.
-
-The list shows each session's name on the right: the `/rename` title, else the Remote Control agent name, else Claude's generated title.
 
 ## Usage
 
