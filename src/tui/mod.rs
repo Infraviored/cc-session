@@ -98,6 +98,9 @@ pub enum Action {
     EnterConversation(usize),
     CopyCommand(String),
     ExecCommand { cmd: String, cwd: String, id: String },
+    /// Hand the command to the shell function as an editable line (or print
+    /// it without one) instead of running it.
+    EditCommand { cmd: String, cwd: String, id: String },
     BackToList,
 }
 
@@ -662,12 +665,14 @@ impl App {
 /// With `exec_file` set, the resume command is written there instead of run,
 /// so a shell function can `eval` it in the user's own shell (see
 /// `cc-session init`): the `cd` then really changes that shell's directory.
+/// A command to edit first goes to `edit_file` instead, or to stdout.
 pub fn run(
     sessions: Vec<Session>,
     theme: Theme,
     config: Config,
     cd_file: Option<String>,
     exec_file: Option<String>,
+    edit_file: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if sessions.is_empty() {
         eprintln!("No sessions found.");
@@ -694,6 +699,7 @@ pub fn run(
     let mut deferred_cwd: Option<String> = None;
     let mut deferred_id: Option<String> = None;
     let mut print_command_on_exit: Option<String> = None;
+    let mut edit_command = false;
 
     // Rescan ~/.claude/projects/ periodically so sessions being actively
     // written elsewhere (timestamps, last-message previews) stay current
@@ -749,6 +755,13 @@ pub fn run(
                             deferred_command = Some(cmd);
                             deferred_cwd = Some(cwd);
                             deferred_id = Some(id);
+                            break;
+                        }
+                        Action::EditCommand { cmd, cwd, id } => {
+                            deferred_command = Some(cmd);
+                            deferred_cwd = Some(cwd);
+                            deferred_id = Some(id);
+                            edit_command = true;
                             break;
                         }
                         Action::BackToList => {
@@ -842,6 +855,14 @@ pub fn run(
             }
             std::process::exit(1);
         }
+    }
+
+    if let (true, Some(cmd)) = (edit_command, &deferred_command) {
+        match &edit_file {
+            Some(path) => std::fs::write(path, cmd)?,
+            None => println!("{cmd}"),
+        }
+        return Ok(());
     }
 
     if let (Some(cmd), Some(path)) = (&deferred_command, &exec_file) {

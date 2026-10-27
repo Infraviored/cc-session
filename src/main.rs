@@ -60,6 +60,12 @@ struct Cli {
     #[arg(long = "exec-file", hide = true)]
     exec_file: Option<String>,
 
+    /// Write the resume command to this file for the shell function to
+    /// offer as an editable line instead of running it (`e` in the launch
+    /// menu). Without it, `e` just prints the command.
+    #[arg(long = "edit-file", hide = true)]
+    edit_file: Option<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -85,7 +91,9 @@ enum Shell {
 
 /// Shell function that runs cc-session with `--exec-file` and then `eval`s
 /// the resume command it wrote, so the `cd` happens in the calling shell and
-/// the command lands in its history.
+/// the command lands in its history. A command written to `--edit-file`
+/// instead is first offered for editing: bash prefills a `read -e` line,
+/// zsh puts it on the next prompt.
 fn shell_init(shell: Shell, name: &str) -> String {
     // `command` keeps the fallback from calling the function itself.
     let exe = std::env::current_exe()
@@ -95,17 +103,27 @@ fn shell_init(shell: Shell, name: &str) -> String {
         Shell::Bash => r#"history -s "$__ccs_cmd""#,
         Shell::Zsh => r#"print -s -- "$__ccs_cmd""#,
     };
+    // Ctrl-C or Ctrl-D at the bash line cancels without running anything.
+    let edit = match shell {
+        Shell::Bash => r#"read -e -r -i "$__ccs_edit" -p '> ' __ccs_cmd || return 130"#,
+        Shell::Zsh => r#"print -z -- "$__ccs_edit"; return 0"#,
+    };
     format!(
         r#"unalias {name} 2>/dev/null
 {name}() {{
-  local __ccs_file __ccs_cmd __ccs_rc
+  local __ccs_file __ccs_editf __ccs_cmd __ccs_edit __ccs_rc
   __ccs_file=$(mktemp) || return
-  {exe} --exec-file "$__ccs_file" "$@"
+  __ccs_editf=$(mktemp) || {{ rm -f "$__ccs_file"; return 1; }}
+  {exe} --exec-file "$__ccs_file" --edit-file "$__ccs_editf" "$@"
   __ccs_rc=$?
   __ccs_cmd=$(cat "$__ccs_file")
-  rm -f "$__ccs_file"
+  __ccs_edit=$(cat "$__ccs_editf")
+  rm -f "$__ccs_file" "$__ccs_editf"
+  if [ -n "$__ccs_edit" ]; then
+    {edit}
+  fi
   [ -n "$__ccs_cmd" ] || return $__ccs_rc
-  printf '%s\n' "$__ccs_cmd"
+  [ -n "$__ccs_edit" ] || printf '%s\n' "$__ccs_cmd"
   {history}
   eval "$__ccs_cmd"
 }}
@@ -201,8 +219,27 @@ fn main() {
     };
 
     // Interactive TUI
-    if let Err(e) = tui::run(sessions, theme, config, cli.cd_file, cli.exec_file) {
+    if let Err(e) = tui::run(sessions, theme, config, cli.cd_file, cli.exec_file, cli.edit_file) {
         eprintln!("TUI error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_init_offers_edit_line_before_eval() {
+        let bash = shell_init(Shell::Bash, "ccs");
+        assert!(bash.contains(r#"--edit-file "$__ccs_editf""#));
+        assert!(bash.contains(r#"read -e -r -i "$__ccs_edit""#));
+        // The edited line, not the original, is what runs and is remembered.
+        let read = bash.find("read -e").unwrap();
+        assert!(read < bash.find("history -s").unwrap());
+        assert!(read < bash.find("eval ").unwrap());
+
+        let zsh = shell_init(Shell::Zsh, "ccs");
+        assert!(zsh.contains(r#"print -z -- "$__ccs_edit"; return 0"#));
     }
 }

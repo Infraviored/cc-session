@@ -73,7 +73,7 @@ This defines a `cc-session` shell function (pass `--name ccs` to `init` for anot
 
 ## Launch modes and profiles
 
-Press **Alt-M** to choose how sessions are resumed. Enter (in the conversation view) and Alt-C (in the list) use the choice, which is remembered in `~/.config/cc-session/state`. Alt-Enter (in either view) opens the same menu for the selected session; Enter there picks the highlighted row and resumes.
+Press **Alt-M** to choose how sessions are resumed. Enter (in the conversation view) and Alt-C (in the list) use the choice, which is remembered in `~/.config/cc-session/state`. Alt-Enter (in either view) opens the same menu for the selected session; Enter there picks the highlighted row and resumes. `y` there copies the command instead, and `e` hands it to your shell as an editable line: add arguments, press Enter to run it, Ctrl-C to drop it. That needs the shell function from `cc-session init` (bash prefills a `read -e` line, zsh puts the command on the next prompt); without it, `e` prints the command.
 
 - **Mode**: extra arguments for `claude`. Defaults: `default` (none) and `skip permissions` (`--dangerously-skip-permissions`). Start with `cc-session --dangerously-skip-permissions` or `--mode <name>` to preselect one.
 - **Profile**: which Claude config directory to resume in. `auto` uses the one the session was found in; non-default directories are passed as `CLAUDE_CONFIG_DIR`.
@@ -89,11 +89,11 @@ A mode can run its own command instead of `claude`, e.g. the sandbox launcher `x
 ```toml
 [[modes]]
 name = "xclaude"
-command = "xclaude"
+command = "xclaude ."
 pass_profile = false
 ```
 
-This runs `cd <session dir> && xclaude -r <id>`. `pass_profile = false` leaves out `CLAUDE_CONFIG_DIR`, so the xclaude build decides which Claude account the container uses (upstream: `~/.claude`). The profile choice in Alt-M is then shown as unused. `pass_profile = false` also works on a plain-claude mode and then drops `CLAUDE_CONFIG_DIR`. A mode's `command` is inserted into the shell line unquoted (quote paths with spaces yourself). The container saves transcripts in the host's `~/.claude/projects`, so a session started under another profile continues there unless the `projects` directories are shared. `--dangerously-skip-permissions` on the command line never selects a mode with its own command. xclaude refuses a home directory as a whole and paths outside `/home/*/*`, so sessions started there can't be resumed this way.
+This runs `cd <session dir> && xclaude . -r <id>`. xclaude makes its first directory argument the working directory and mounts every directory argument, so the `.` keeps the session's directory first. To mount more, press `e` in the Alt-Enter menu and add them after the `.`: `xclaude . ~/code/shared-lib -r <id>`. `pass_profile = false` leaves out `CLAUDE_CONFIG_DIR`, so the xclaude build decides which Claude account the container uses (upstream: `~/.claude`). The profile choice in Alt-M is then shown as unused. `pass_profile = false` also works on a plain-claude mode and then drops `CLAUDE_CONFIG_DIR`. A mode's `command` is inserted into the shell line unquoted (quote paths with spaces yourself). The container saves transcripts in the host's `~/.claude/projects`, so a session started under another profile continues there unless the `projects` directories are shared. `--dangerously-skip-permissions` on the command line never selects a mode with its own command. xclaude refuses a home directory as a whole and paths outside `/home/*/*`, so sessions started there can't be resumed this way.
 
 Inside an xclaude container, cc-session lists the host's sessions too, but only the mounted directories can be resumed. For any other session, it prints the command to run on the host instead of failing on `cd`.
 
@@ -149,7 +149,7 @@ cc-session --since 7d --last 10  # both constraints
 | `Left` / `Right` | Move cursor within filter text |
 | `Enter` | Open conversation viewer (on session) / toggle group (on header) |
 | `Alt-C` | Resume selected session directly |
-| `Alt-Enter` | Pick mode/profile in the launch menu, Enter there resumes |
+| `Alt-Enter` | Pick mode/profile in the launch menu, Enter there resumes, `e` edits in the shell, `y` copies |
 | `Alt-M` | Launch menu: mode and profile to resume with |
 | `Alt-G` | Toggle project grouping view |
 | Mouse click | Select item (first click), open/toggle (second click) |
@@ -168,7 +168,7 @@ cc-session --since 7d --last 10  # both constraints
 | `/` | Search within conversation |
 | `n` / `N` | Jump to next / previous match |
 | `Enter` | Resume session with the current launch mode and profile |
-| `Alt-Enter` | Pick mode/profile in the launch menu, Enter there resumes |
+| `Alt-Enter` | Pick mode/profile in the launch menu, Enter there resumes, `e` edits in the shell, `y` copies |
 | `Alt-M` | Launch menu: mode and profile to resume with |
 | `y` | Copy resume command to clipboard and exit |
 | `Esc` | Clear search (first), back to list (second) |

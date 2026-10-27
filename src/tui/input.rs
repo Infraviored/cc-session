@@ -332,6 +332,23 @@ fn handle_mode_menu(app: &mut App, key: KeyEvent) -> Action {
             pick_row(app, rows[idx]);
         }
         KeyCode::Char(' ') => pick_row(app, rows[sel]),
+        // With a session to resume: hand its command to the shell to edit
+        // (e.g. more directories for xclaude), or only copy it.
+        KeyCode::Char(c @ ('e' | 'y')) if app.menu_launch.is_some() => {
+            pick_row(app, rows[sel]);
+            let session = app.menu_launch.take().expect("checked above");
+            app.mode_menu = None;
+            let cmd = app.resume_command(&session);
+            return if c == 'e' {
+                Action::EditCommand {
+                    cmd,
+                    cwd: session.cwd,
+                    id: session.id,
+                }
+            } else {
+                Action::CopyCommand(cmd)
+            };
+        }
         KeyCode::Enter => {
             pick_row(app, rows[sel]);
             if let Some(session) = app.menu_launch.take() {
