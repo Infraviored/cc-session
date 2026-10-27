@@ -34,8 +34,10 @@ args = ["--dangerously-skip-permissions"]
 
 # A mode can run its own command instead of `command`, e.g. the sandbox
 # launcher xclaude (claude-in-a-box), which mounts the session's directory
-# into a fresh container. `pass_profile = false` leaves out CLAUDE_CONFIG_DIR:
-# the launcher picks the Claude account itself.
+# into a fresh container. A mode's `command` is inserted into the shell line
+# unquoted (quote paths with spaces yourself). `pass_profile = false`
+# leaves out CLAUDE_CONFIG_DIR (the launcher picks the Claude account itself);
+# it also works on a plain-claude mode and then drops CLAUDE_CONFIG_DIR.
 #
 # [[modes]]
 # name = "xclaude"

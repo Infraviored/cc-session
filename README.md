@@ -93,7 +93,7 @@ command = "xclaude"
 pass_profile = false
 ```
 
-This runs `cd <session dir> && xclaude -r <id>`. `pass_profile = false` leaves out `CLAUDE_CONFIG_DIR`, so the xclaude build decides which Claude account the container uses (upstream: `~/.claude`). The profile choice in Alt-M is then shown as unused. The container saves transcripts in the host's `~/.claude/projects`, so a session started under another profile continues there unless the `projects` directories are shared. `--dangerously-skip-permissions` on the command line never selects a mode with its own command. xclaude refuses a home directory as a whole and paths outside `/home/*/*`, so sessions started there can't be resumed this way.
+This runs `cd <session dir> && xclaude -r <id>`. `pass_profile = false` leaves out `CLAUDE_CONFIG_DIR`, so the xclaude build decides which Claude account the container uses (upstream: `~/.claude`). The profile choice in Alt-M is then shown as unused. `pass_profile = false` also works on a plain-claude mode and then drops `CLAUDE_CONFIG_DIR`. A mode's `command` is inserted into the shell line unquoted (quote paths with spaces yourself). The container saves transcripts in the host's `~/.claude/projects`, so a session started under another profile continues there unless the `projects` directories are shared. `--dangerously-skip-permissions` on the command line never selects a mode with its own command. xclaude refuses a home directory as a whole and paths outside `/home/*/*`, so sessions started there can't be resumed this way.
 
 Inside an xclaude container, cc-session lists the host's sessions too, but only the mounted directories can be resumed. For any other session, it prints the command to run on the host instead of failing on `cd`.
 
