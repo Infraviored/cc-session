@@ -37,10 +37,18 @@ fn render_mode_menu(frame: &mut Frame, app: &App, area: Rect) {
     let dim = Style::default().fg(app.theme.text_dim);
     let heading = Style::default().fg(app.theme.heading).bold();
     let rows = app.menu_rows();
+    let current = app.config.current_mode();
+    let command = app.config.command_for(current);
     let mut lines: Vec<Line> = vec![Line::from(Span::styled(" mode", heading))];
     for (i, &row) in rows.iter().enumerate() {
         if row == MenuRow::Profile(None) {
-            lines.push(Line::from(Span::styled(" profile", heading)));
+            // A launcher that picks its own account ignores the profile.
+            let title = if current.pass_profile {
+                " profile".to_string()
+            } else {
+                format!(" profile (not used by {command})")
+            };
+            lines.push(Line::from(Span::styled(title, heading)));
         }
         let (name, detail) = match row {
             MenuRow::Mode(m) => {
@@ -50,7 +58,11 @@ fn render_mode_menu(frame: &mut Frame, app: &App, area: Rect) {
                 } else {
                     mode.args.join(" ")
                 };
-                (mode.name.clone(), args)
+                let detail = match &mode.command {
+                    Some(command) => format!("{command} \u{00B7} {args}"),
+                    None => args,
+                };
+                (mode.name.clone(), detail)
             }
             MenuRow::Profile(None) => (
                 "auto".to_string(),
@@ -63,9 +75,11 @@ fn render_mode_menu(frame: &mut Frame, app: &App, area: Rect) {
         };
         let marker = if app.menu_row_active(row) { "\u{25CF}" } else { " " };
         let number = if i < 9 { format!("{}", i + 1) } else { " ".to_string() };
+        let unused = matches!(row, MenuRow::Profile(_)) && !current.pass_profile;
+        let name_style = if unused { dim } else { Style::default().fg(app.theme.text) };
         let line = Line::from(vec![
             Span::styled(format!(" {number} {marker} "), dim),
-            Span::styled(format!("{name:<18}"), Style::default().fg(app.theme.text)),
+            Span::styled(format!("{name:<18}"), name_style),
             Span::styled(format!("{detail} "), dim),
         ]);
         lines.push(if i == selected {
@@ -98,7 +112,7 @@ fn render_mode_menu(frame: &mut Frame, app: &App, area: Rect) {
                 " resume {} ",
                 truncate_str(session.name.as_deref().unwrap_or(&session.project_name), 40)
             ),
-            None => format!(" resume with \u{00B7} {} ", app.config.command),
+            None => format!(" resume with \u{00B7} {command} "),
         });
     frame.render_widget(ratatui::widgets::Clear, rect);
     frame.render_widget(

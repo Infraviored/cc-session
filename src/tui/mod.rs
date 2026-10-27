@@ -825,6 +825,17 @@ pub fn run(
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
 
+    if let (Some(cmd), Some(cwd)) = (&deferred_command, &deferred_cwd) {
+        let container = std::env::var("XCLAUDE_CONTAINER").unwrap_or_default();
+        if let Some(hint) = unmounted_hint(cmd, cwd, &container, std::path::Path::new(cwd).is_dir()) {
+            eprintln!("{hint}");
+            if clipboard::copy_to_clipboard(cmd).is_ok() {
+                eprintln!("(copied to the clipboard)");
+            }
+            std::process::exit(1);
+        }
+    }
+
     if let (Some(cmd), Some(path)) = (&deferred_command, &exec_file) {
         if deferred_cwd.is_some() {
             std::fs::write(path, cmd)?;
@@ -851,4 +862,33 @@ pub fn run(
     }
 
     Ok(())
+}
+
+/// Message for resuming a session whose directory isn't mounted in the
+/// xclaude container cc-session runs in: `cd` would fail there, and only the
+/// host can start a container that mounts it. `None` outside a container or
+/// when the directory is there.
+fn unmounted_hint(cmd: &str, cwd: &str, container: &str, cwd_exists: bool) -> Option<String> {
+    if container.is_empty() || cwd_exists {
+        return None;
+    }
+    Some(format!(
+        "{cwd} is not mounted in this xclaude container ({container}).\n\
+         Resume it on the host:\n\n    {cmd}\n"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unmounted_hint_only_inside_container_for_missing_dir() {
+        let cmd = "cd /home/u/x && claude -r abc";
+        assert_eq!(unmounted_hint(cmd, "/home/u/x", "", false), None);
+        assert_eq!(unmounted_hint(cmd, "/home/u/x", "xclaude-x-1", true), None);
+        let hint = unmounted_hint(cmd, "/home/u/x", "xclaude-x-1", false).unwrap();
+        assert!(hint.contains("/home/u/x is not mounted"));
+        assert!(hint.contains(cmd));
+    }
 }
