@@ -41,5 +41,5 @@ args = ["--dangerously-skip-permissions"]
 #
 # [[modes]]
 # name = "xclaude"
-# command = "xclaude"
+# command = "xclaude ."   # `.` = the session's dir; add more with `e` in Alt-Enter
 # pass_profile = false

@@ -47,7 +47,7 @@ fn render_mode_menu(frame: &mut Frame, app: &App, area: Rect) {
             let title = if current.pass_profile {
                 " profile".to_string()
             } else {
-                format!(" profile (not used by {command})")
+                format!(" profile (not used by {})", current.name)
             };
             lines.push(Line::from(Span::styled(title, heading)));
         }
@@ -90,7 +90,7 @@ fn render_mode_menu(frame: &mut Frame, app: &App, area: Rect) {
         });
     }
     let hint = if app.menu_launch.is_some() {
-        " \u{2191}\u{2193} move  Space/1-9 pick  Enter pick+resume  Esc cancel "
+        " \u{2191}\u{2193} move  Space/1-9 pick  Enter pick+resume  e edit in shell  y copy  Esc cancel "
     } else {
         " \u{2191}\u{2193} move  Enter pick  Space/1-9 pick+stay  Esc close "
     };
