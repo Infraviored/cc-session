@@ -356,20 +356,26 @@ fn close_menu(app: &mut App) {
     app.menu_launch = None;
 }
 
+pub(crate) fn pick_row_status_message(config: &crate::config::Config) -> String {
+    let current = config.current_mode();
+    if current.pass_profile {
+        format!(
+            "Resume with: {} \u{00B7} profile {}",
+            current.name,
+            config.profile_label()
+        )
+    } else {
+        format!("Resume with: {}", current.name)
+    }
+}
+
 fn pick_row(app: &mut App, row: MenuRow) {
     match row {
         MenuRow::Mode(i) => app.config.mode = i,
         MenuRow::Profile(p) => app.config.profile_override = p,
     }
     app.config.save_state();
-    app.status_message = Some((
-        format!(
-            "Resume with: {} \u{00B7} profile {}",
-            app.config.current_mode().name,
-            app.config.profile_label()
-        ),
-        Instant::now(),
-    ));
+    app.status_message = Some((pick_row_status_message(&app.config), Instant::now()));
 }
 
 fn handle_conversation_search(app: &mut App, key: KeyEvent) -> Action {

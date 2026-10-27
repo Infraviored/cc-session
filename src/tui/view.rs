@@ -8,6 +8,7 @@ use crate::session::{ConversationMessage, MessageRole};
 
 use super::table;
 use super::{App, ContentSearchState, DisplayItem, MatchType, MenuRow, Mode};
+use crate::config::Config;
 
 /// Render the full TUI frame.
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -982,6 +983,15 @@ fn wrap_line(line: &str, width: usize) -> Vec<String> {
     result
 }
 
+pub(crate) fn status_bar_mode_label(config: &Config) -> String {
+    let current = config.current_mode();
+    if config.profiles.len() > 1 && current.pass_profile {
+        format!("{} \u{00B7} {}", current.name, config.profile_label())
+    } else {
+        current.name.clone()
+    }
+}
+
 /// Render the status/help bar at the bottom.
 fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let dim = Style::default().fg(app.theme.text_dim);
@@ -1030,15 +1040,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 Line::from(vec![
                     Span::styled(" ⌥M ", dim),
                     Span::styled(
-                        if app.config.profiles.len() > 1 {
-                            format!(
-                                "{} \u{00B7} {}",
-                                app.config.current_mode().name,
-                                app.config.profile_label()
-                            )
-                        } else {
-                            app.config.current_mode().name.clone()
-                        },
+                        status_bar_mode_label(&app.config),
                         Style::default().fg(app.theme.heading),
                     ),
                     Span::raw("  "),
@@ -1515,6 +1517,45 @@ mod tests {
             full_text.chars().count() <= 20,
             "Should not exceed max_len: got {} chars",
             full_text.chars().count()
+        );
+    }
+
+    #[test]
+    fn test_status_bar_mode_label_omits_profile_when_pass_profile_false() {
+        let mut config = Config::default();
+        config.profiles.push(crate::config::Profile {
+            name: "work".to_string(),
+            config_dir: std::path::PathBuf::from("/work"),
+        });
+        assert_eq!(status_bar_mode_label(&config), "default \u{00B7} auto");
+
+        config.modes.push(crate::config::LaunchMode {
+            name: "xclaude".to_string(),
+            args: vec![],
+            command: Some("xclaude".to_string()),
+            pass_profile: false,
+        });
+        config.mode = config.modes.len() - 1;
+        assert_eq!(status_bar_mode_label(&config), "xclaude");
+    }
+
+    #[test]
+    fn test_pick_row_status_message_omits_profile_when_pass_profile_false() {
+        let mut config = Config::default();
+        assert_eq!(
+            crate::tui::input::pick_row_status_message(&config),
+            "Resume with: default \u{00B7} profile auto"
+        );
+        config.modes.push(crate::config::LaunchMode {
+            name: "xclaude".to_string(),
+            args: vec![],
+            command: Some("xclaude".to_string()),
+            pass_profile: false,
+        });
+        config.mode = config.modes.len() - 1;
+        assert_eq!(
+            crate::tui::input::pick_row_status_message(&config),
+            "Resume with: xclaude"
         );
     }
 }
