@@ -97,7 +97,7 @@ pub enum Action {
     Quit,
     EnterConversation(usize),
     CopyCommand(String),
-    ExecCommand { cmd: String, cwd: String },
+    ExecCommand { cmd: String, cwd: String, id: String },
     BackToList,
 }
 
@@ -692,6 +692,7 @@ pub fn run(
     app.config = config;
     let mut deferred_command: Option<String> = None;
     let mut deferred_cwd: Option<String> = None;
+    let mut deferred_id: Option<String> = None;
     let mut print_command_on_exit: Option<String> = None;
 
     // Rescan ~/.claude/projects/ periodically so sessions being actively
@@ -744,9 +745,10 @@ pub fn run(
                             }
                             break;
                         }
-                        Action::ExecCommand { cmd, cwd } => {
+                        Action::ExecCommand { cmd, cwd, id } => {
                             deferred_command = Some(cmd);
                             deferred_cwd = Some(cwd);
+                            deferred_id = Some(id);
                             break;
                         }
                         Action::BackToList => {
@@ -830,11 +832,12 @@ pub fn run(
         return Ok(());
     }
 
-    if let (Some(cmd), Some(cwd)) = (&deferred_command, &deferred_cwd) {
+    if let (Some(id), Some(cwd)) = (&deferred_id, &deferred_cwd) {
         let container = std::env::var("XCLAUDE_CONTAINER").unwrap_or_default();
-        if let Some(hint) = unmounted_hint(cmd, cwd, &container, std::path::Path::new(cwd).is_dir()) {
+        if let Some(hint) = unmounted_hint(id, cwd, &container, std::path::Path::new(cwd).is_dir()) {
             eprintln!("{hint}");
-            if clipboard::copy_to_clipboard(cmd).is_ok() {
+            let host_cmd = unmounted_host_command(id, cwd);
+            if clipboard::copy_to_clipboard(&host_cmd).is_ok() {
                 eprintln!("(copied to the clipboard)");
             }
             std::process::exit(1);
@@ -877,17 +880,27 @@ fn copy_fallback_command(copy_result: Result<(), String>, cmd: &str) -> Option<S
     }
 }
 
+/// Shell command to resume a session on the host with xclaude.
+fn unmounted_host_command(id: &str, cwd: &str) -> String {
+    format!(
+        "cd {} && xclaude -r {}",
+        crate::config::shell_quote(cwd),
+        crate::config::shell_quote(id)
+    )
+}
+
 /// Message for resuming a session whose directory isn't mounted in the
 /// xclaude container cc-session runs in: `cd` would fail there, and only the
 /// host can start a container that mounts it. `None` outside a container or
 /// when the directory is there.
-fn unmounted_hint(cmd: &str, cwd: &str, container: &str, cwd_exists: bool) -> Option<String> {
+fn unmounted_hint(id: &str, cwd: &str, container: &str, cwd_exists: bool) -> Option<String> {
     if container.is_empty() || cwd_exists {
         return None;
     }
+    let host_cmd = unmounted_host_command(id, cwd);
     Some(format!(
-        "{cwd} is not mounted in this xclaude container ({container}).\n\
-         Resume it on the host:\n\n    {cmd}\n"
+        "{cwd} not found in this xclaude container ({container}): not mounted, or deleted.\n\
+         Resume it on the host:\n\n    {host_cmd}\n"
     ))
 }
 
@@ -897,12 +910,17 @@ mod tests {
 
     #[test]
     fn unmounted_hint_only_inside_container_for_missing_dir() {
-        let cmd = "cd /home/u/x && claude -r abc";
-        assert_eq!(unmounted_hint(cmd, "/home/u/x", "", false), None);
-        assert_eq!(unmounted_hint(cmd, "/home/u/x", "xclaude-x-1", true), None);
-        let hint = unmounted_hint(cmd, "/home/u/x", "xclaude-x-1", false).unwrap();
-        assert!(hint.contains("/home/u/x is not mounted"));
-        assert!(hint.contains(cmd));
+        assert_eq!(unmounted_hint("abc", "/home/u/x", "", false), None);
+        assert_eq!(unmounted_hint("abc", "/home/u/x", "xclaude-x-1", true), None);
+        let hint = unmounted_hint("abc", "/home/u/x", "xclaude-x-1", false).unwrap();
+        assert!(hint.contains("/home/u/x not found in this xclaude container (xclaude-x-1): not mounted, or deleted."));
+        assert!(hint.contains("cd /home/u/x && xclaude -r abc"));
+    }
+
+    #[test]
+    fn unmounted_hint_quotes_cwd_and_id_when_needed() {
+        let hint = unmounted_hint("my id", "/home/u/my proj", "box", false).unwrap();
+        assert!(hint.contains("cd '/home/u/my proj' && xclaude -r 'my id'"));
     }
 
     #[test]

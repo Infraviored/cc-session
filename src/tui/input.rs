@@ -52,7 +52,8 @@ fn handle_browse(app: &mut App, key: KeyEvent) -> Action {
             let session = app.display_session(entry);
             let cmd = app.resume_command(session);
             let cwd = session.cwd.clone();
-            return Action::ExecCommand { cmd, cwd };
+            let id = session.id.clone();
+            return Action::ExecCommand { cmd, cwd, id };
         }
         return Action::Continue;
     }
@@ -294,7 +295,8 @@ fn handle_conversation(app: &mut App, key: KeyEvent) -> Action {
                 } else {
                     let cmd = app.resume_command(&conv.session);
                     let cwd = conv.session.cwd.clone();
-                    Action::ExecCommand { cmd, cwd }
+                    let id = conv.session.id.clone();
+                    Action::ExecCommand { cmd, cwd, id }
                 }
             } else {
                 Action::Continue
@@ -335,7 +337,11 @@ fn handle_mode_menu(app: &mut App, key: KeyEvent) -> Action {
             if let Some(session) = app.menu_launch.take() {
                 app.mode_menu = None;
                 let cmd = app.resume_command(&session);
-                return Action::ExecCommand { cmd, cwd: session.cwd };
+                return Action::ExecCommand {
+                    cmd,
+                    cwd: session.cwd,
+                    id: session.id,
+                };
             }
             app.mode_menu = None;
         }
