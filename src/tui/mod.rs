@@ -97,7 +97,7 @@ pub enum Action {
     Quit,
     EnterConversation(usize),
     CopyCommand(String),
-    ExecCommand { cmd: String, cwd: String },
+    ExecCommand { cmd: String, cwd: String, id: String },
     BackToList,
 }
 
@@ -692,6 +692,8 @@ pub fn run(
     app.config = config;
     let mut deferred_command: Option<String> = None;
     let mut deferred_cwd: Option<String> = None;
+    let mut deferred_id: Option<String> = None;
+    let mut print_command_on_exit: Option<String> = None;
 
     // Rescan ~/.claude/projects/ periodically so sessions being actively
     // written elsewhere (timestamps, last-message previews) stay current
@@ -737,16 +739,16 @@ pub fn run(
                         Action::EnterConversation(idx) => {
                             app.enter_conversation(idx);
                         }
-                        Action::CopyCommand(cmd) => match clipboard::copy_to_clipboard(&cmd) {
-                            Ok(()) => break,
-                            Err(_) => {
-                                deferred_command = Some(cmd);
-                                break;
+                        Action::CopyCommand(cmd) => {
+                            if let Some(cmd) = copy_fallback_command(clipboard::copy_to_clipboard(&cmd), &cmd) {
+                                print_command_on_exit = Some(cmd);
                             }
-                        },
-                        Action::ExecCommand { cmd, cwd } => {
+                            break;
+                        }
+                        Action::ExecCommand { cmd, cwd, id } => {
                             deferred_command = Some(cmd);
                             deferred_cwd = Some(cwd);
+                            deferred_id = Some(id);
                             break;
                         }
                         Action::BackToList => {
@@ -825,6 +827,23 @@ pub fn run(
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
 
+    if let Some(cmd) = print_command_on_exit {
+        println!("{cmd}");
+        return Ok(());
+    }
+
+    if let (Some(id), Some(cwd)) = (&deferred_id, &deferred_cwd) {
+        let container = std::env::var("XCLAUDE_CONTAINER").unwrap_or_default();
+        if let Some(hint) = unmounted_hint(id, cwd, &container, std::path::Path::new(cwd).is_dir()) {
+            eprintln!("{hint}");
+            let host_cmd = unmounted_host_command(id, cwd);
+            if clipboard::copy_to_clipboard(&host_cmd).is_ok() {
+                eprintln!("(copied to the clipboard)");
+            }
+            std::process::exit(1);
+        }
+    }
+
     if let (Some(cmd), Some(path)) = (&deferred_command, &exec_file) {
         if deferred_cwd.is_some() {
             std::fs::write(path, cmd)?;
@@ -851,4 +870,65 @@ pub fn run(
     }
 
     Ok(())
+}
+
+/// Resolve clipboard copy result: on failure, fallback to printing the command on exit.
+fn copy_fallback_command(copy_result: Result<(), String>, cmd: &str) -> Option<String> {
+    match copy_result {
+        Ok(()) => None,
+        Err(_) => Some(cmd.to_string()),
+    }
+}
+
+/// Shell command to resume a session on the host with xclaude.
+fn unmounted_host_command(id: &str, cwd: &str) -> String {
+    format!(
+        "cd {} && xclaude -r {}",
+        crate::config::shell_quote(cwd),
+        crate::config::shell_quote(id)
+    )
+}
+
+/// Message for resuming a session whose directory isn't mounted in the
+/// xclaude container cc-session runs in: `cd` would fail there, and only the
+/// host can start a container that mounts it. `None` outside a container or
+/// when the directory is there.
+fn unmounted_hint(id: &str, cwd: &str, container: &str, cwd_exists: bool) -> Option<String> {
+    if container.is_empty() || cwd_exists {
+        return None;
+    }
+    let host_cmd = unmounted_host_command(id, cwd);
+    Some(format!(
+        "{cwd} not found in this xclaude container ({container}): not mounted, or deleted.\n\
+         Resume it on the host:\n\n    {host_cmd}\n"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unmounted_hint_only_inside_container_for_missing_dir() {
+        assert_eq!(unmounted_hint("abc", "/home/u/x", "", false), None);
+        assert_eq!(unmounted_hint("abc", "/home/u/x", "xclaude-x-1", true), None);
+        let hint = unmounted_hint("abc", "/home/u/x", "xclaude-x-1", false).unwrap();
+        assert!(hint.contains("/home/u/x not found in this xclaude container (xclaude-x-1): not mounted, or deleted."));
+        assert!(hint.contains("cd /home/u/x && xclaude -r abc"));
+    }
+
+    #[test]
+    fn unmounted_hint_quotes_cwd_and_id_when_needed() {
+        let hint = unmounted_hint("my id", "/home/u/my proj", "box", false).unwrap();
+        assert!(hint.contains("cd '/home/u/my proj' && xclaude -r 'my id'"));
+    }
+
+    #[test]
+    fn copy_fallback_does_not_execute() {
+        assert_eq!(copy_fallback_command(Ok(()), "claude -r abc"), None);
+        assert_eq!(
+            copy_fallback_command(Err("no clipboard".into()), "claude -r abc"),
+            Some("claude -r abc".to_string())
+        );
+    }
 }

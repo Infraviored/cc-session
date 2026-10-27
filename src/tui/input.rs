@@ -52,7 +52,8 @@ fn handle_browse(app: &mut App, key: KeyEvent) -> Action {
             let session = app.display_session(entry);
             let cmd = app.resume_command(session);
             let cwd = session.cwd.clone();
-            return Action::ExecCommand { cmd, cwd };
+            let id = session.id.clone();
+            return Action::ExecCommand { cmd, cwd, id };
         }
         return Action::Continue;
     }
@@ -294,7 +295,8 @@ fn handle_conversation(app: &mut App, key: KeyEvent) -> Action {
                 } else {
                     let cmd = app.resume_command(&conv.session);
                     let cwd = conv.session.cwd.clone();
-                    Action::ExecCommand { cmd, cwd }
+                    let id = conv.session.id.clone();
+                    Action::ExecCommand { cmd, cwd, id }
                 }
             } else {
                 Action::Continue
@@ -335,7 +337,11 @@ fn handle_mode_menu(app: &mut App, key: KeyEvent) -> Action {
             if let Some(session) = app.menu_launch.take() {
                 app.mode_menu = None;
                 let cmd = app.resume_command(&session);
-                return Action::ExecCommand { cmd, cwd: session.cwd };
+                return Action::ExecCommand {
+                    cmd,
+                    cwd: session.cwd,
+                    id: session.id,
+                };
             }
             app.mode_menu = None;
         }
@@ -356,20 +362,26 @@ fn close_menu(app: &mut App) {
     app.menu_launch = None;
 }
 
+pub(crate) fn pick_row_status_message(config: &crate::config::Config) -> String {
+    let current = config.current_mode();
+    if current.pass_profile {
+        format!(
+            "Resume with: {} \u{00B7} profile {}",
+            current.name,
+            config.profile_label()
+        )
+    } else {
+        format!("Resume with: {}", current.name)
+    }
+}
+
 fn pick_row(app: &mut App, row: MenuRow) {
     match row {
         MenuRow::Mode(i) => app.config.mode = i,
         MenuRow::Profile(p) => app.config.profile_override = p,
     }
     app.config.save_state();
-    app.status_message = Some((
-        format!(
-            "Resume with: {} \u{00B7} profile {}",
-            app.config.current_mode().name,
-            app.config.profile_label()
-        ),
-        Instant::now(),
-    ));
+    app.status_message = Some((pick_row_status_message(&app.config), Instant::now()));
 }
 
 fn handle_conversation_search(app: &mut App, key: KeyEvent) -> Action {

@@ -8,6 +8,7 @@ use crate::session::{ConversationMessage, MessageRole};
 
 use super::table;
 use super::{App, ContentSearchState, DisplayItem, MatchType, MenuRow, Mode};
+use crate::config::Config;
 
 /// Render the full TUI frame.
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -37,10 +38,18 @@ fn render_mode_menu(frame: &mut Frame, app: &App, area: Rect) {
     let dim = Style::default().fg(app.theme.text_dim);
     let heading = Style::default().fg(app.theme.heading).bold();
     let rows = app.menu_rows();
+    let current = app.config.current_mode();
+    let command = app.config.command_for(current);
     let mut lines: Vec<Line> = vec![Line::from(Span::styled(" mode", heading))];
     for (i, &row) in rows.iter().enumerate() {
         if row == MenuRow::Profile(None) {
-            lines.push(Line::from(Span::styled(" profile", heading)));
+            // A launcher that picks its own account ignores the profile.
+            let title = if current.pass_profile {
+                " profile".to_string()
+            } else {
+                format!(" profile (not used by {command})")
+            };
+            lines.push(Line::from(Span::styled(title, heading)));
         }
         let (name, detail) = match row {
             MenuRow::Mode(m) => {
@@ -50,7 +59,11 @@ fn render_mode_menu(frame: &mut Frame, app: &App, area: Rect) {
                 } else {
                     mode.args.join(" ")
                 };
-                (mode.name.clone(), args)
+                let detail = match &mode.command {
+                    Some(command) => format!("{command} \u{00B7} {args}"),
+                    None => args,
+                };
+                (mode.name.clone(), detail)
             }
             MenuRow::Profile(None) => (
                 "auto".to_string(),
@@ -63,9 +76,11 @@ fn render_mode_menu(frame: &mut Frame, app: &App, area: Rect) {
         };
         let marker = if app.menu_row_active(row) { "\u{25CF}" } else { " " };
         let number = if i < 9 { format!("{}", i + 1) } else { " ".to_string() };
+        let unused = matches!(row, MenuRow::Profile(_)) && !current.pass_profile;
+        let name_style = if unused { dim } else { Style::default().fg(app.theme.text) };
         let line = Line::from(vec![
             Span::styled(format!(" {number} {marker} "), dim),
-            Span::styled(format!("{name:<18}"), Style::default().fg(app.theme.text)),
+            Span::styled(format!("{name:<18}"), name_style),
             Span::styled(format!("{detail} "), dim),
         ]);
         lines.push(if i == selected {
@@ -98,7 +113,7 @@ fn render_mode_menu(frame: &mut Frame, app: &App, area: Rect) {
                 " resume {} ",
                 truncate_str(session.name.as_deref().unwrap_or(&session.project_name), 40)
             ),
-            None => format!(" resume with \u{00B7} {} ", app.config.command),
+            None => format!(" resume with \u{00B7} {command} "),
         });
     frame.render_widget(ratatui::widgets::Clear, rect);
     frame.render_widget(
@@ -968,6 +983,15 @@ fn wrap_line(line: &str, width: usize) -> Vec<String> {
     result
 }
 
+pub(crate) fn status_bar_mode_label(config: &Config) -> String {
+    let current = config.current_mode();
+    if config.profiles.len() > 1 && current.pass_profile {
+        format!("{} \u{00B7} {}", current.name, config.profile_label())
+    } else {
+        current.name.clone()
+    }
+}
+
 /// Render the status/help bar at the bottom.
 fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let dim = Style::default().fg(app.theme.text_dim);
@@ -1016,15 +1040,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 Line::from(vec![
                     Span::styled(" ⌥M ", dim),
                     Span::styled(
-                        if app.config.profiles.len() > 1 {
-                            format!(
-                                "{} \u{00B7} {}",
-                                app.config.current_mode().name,
-                                app.config.profile_label()
-                            )
-                        } else {
-                            app.config.current_mode().name.clone()
-                        },
+                        status_bar_mode_label(&app.config),
                         Style::default().fg(app.theme.heading),
                     ),
                     Span::raw("  "),
@@ -1501,6 +1517,45 @@ mod tests {
             full_text.chars().count() <= 20,
             "Should not exceed max_len: got {} chars",
             full_text.chars().count()
+        );
+    }
+
+    #[test]
+    fn test_status_bar_mode_label_omits_profile_when_pass_profile_false() {
+        let mut config = Config::default();
+        config.profiles.push(crate::config::Profile {
+            name: "work".to_string(),
+            config_dir: std::path::PathBuf::from("/work"),
+        });
+        assert_eq!(status_bar_mode_label(&config), "default \u{00B7} auto");
+
+        config.modes.push(crate::config::LaunchMode {
+            name: "xclaude".to_string(),
+            args: vec![],
+            command: Some("xclaude".to_string()),
+            pass_profile: false,
+        });
+        config.mode = config.modes.len() - 1;
+        assert_eq!(status_bar_mode_label(&config), "xclaude");
+    }
+
+    #[test]
+    fn test_pick_row_status_message_omits_profile_when_pass_profile_false() {
+        let mut config = Config::default();
+        assert_eq!(
+            crate::tui::input::pick_row_status_message(&config),
+            "Resume with: default \u{00B7} profile auto"
+        );
+        config.modes.push(crate::config::LaunchMode {
+            name: "xclaude".to_string(),
+            args: vec![],
+            command: Some("xclaude".to_string()),
+            pass_profile: false,
+        });
+        config.mode = config.modes.len() - 1;
+        assert_eq!(
+            crate::tui::input::pick_row_status_message(&config),
+            "Resume with: xclaude"
         );
     }
 }

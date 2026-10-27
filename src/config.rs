@@ -22,6 +22,23 @@ pub struct Profile {
 pub struct LaunchMode {
     pub name: String,
     pub args: Vec<String>,
+    /// Command run instead of the global one, e.g. a sandbox launcher such
+    /// as `xclaude`.
+    pub command: Option<String>,
+    /// Whether to resume in the session's profile via `CLAUDE_CONFIG_DIR`.
+    /// Off for launchers that pick the Claude account themselves.
+    pub pass_profile: bool,
+}
+
+impl LaunchMode {
+    fn new(name: &str, args: Vec<String>) -> Self {
+        LaunchMode {
+            name: name.to_string(),
+            args,
+            command: None,
+            pass_profile: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +82,8 @@ struct RawMode {
     name: String,
     #[serde(default)]
     args: Vec<String>,
+    command: Option<String>,
+    pass_profile: Option<bool>,
 }
 
 pub const SKIP_PERMISSIONS: &str = "--dangerously-skip-permissions";
@@ -87,14 +106,8 @@ impl Default for Config {
 
 fn default_modes() -> Vec<LaunchMode> {
     vec![
-        LaunchMode {
-            name: "default".to_string(),
-            args: Vec::new(),
-        },
-        LaunchMode {
-            name: "skip permissions".to_string(),
-            args: vec![SKIP_PERMISSIONS.to_string()],
-        },
+        LaunchMode::new("default", Vec::new()),
+        LaunchMode::new("skip permissions", vec![SKIP_PERMISSIONS.to_string()]),
     ]
 }
 
@@ -184,6 +197,8 @@ impl Config {
                 .map(|m| LaunchMode {
                     name: m.name,
                     args: m.args,
+                    command: m.command.filter(|c| !c.trim().is_empty()),
+                    pass_profile: m.pass_profile.unwrap_or(true),
                 })
                 .collect();
         }
@@ -208,20 +223,31 @@ impl Config {
     }
 
     /// Make the first mode passing `arg` current, adding one if none does.
+    /// Modes with their own command (a sandbox launcher) don't count: a
+    /// command-line flag means plain Claude.
     pub fn select_mode_with_arg(&mut self, arg: &str) {
-        if let Some(i) = self.modes.iter().position(|m| m.args.iter().any(|a| a == arg)) {
+        if let Some(i) = self
+            .modes
+            .iter()
+            .position(|m| m.command.is_none() && m.args.iter().any(|a| a == arg))
+        {
             self.mode = i;
         } else {
-            self.modes.push(LaunchMode {
-                name: arg.trim_start_matches('-').replace('-', " "),
-                args: vec![arg.to_string()],
-            });
+            self.modes.push(LaunchMode::new(
+                &arg.trim_start_matches('-').replace('-', " "),
+                vec![arg.to_string()],
+            ));
             self.mode = self.modes.len() - 1;
         }
     }
 
     pub fn current_mode(&self) -> &LaunchMode {
         &self.modes[self.mode]
+    }
+
+    /// Command `mode` starts Claude with: its own, else the global one.
+    pub fn command_for<'a>(&'a self, mode: &'a LaunchMode) -> &'a str {
+        mode.command.as_deref().unwrap_or(&self.command)
     }
 
     /// Remember the current mode and profile for the next start. Best effort.
@@ -256,10 +282,11 @@ impl Config {
     }
 
     /// Shell command that resumes `session` in its own directory and profile
-    /// with `mode`'s extra arguments.
+    /// with `mode`'s command and extra arguments.
     pub fn resume_command(&self, session: &crate::session::Session, mode: &LaunchMode) -> String {
         let mut cmd = format!("cd {} && ", shell_quote(&session.cwd));
         let profile = match self.profile_override {
+            _ if !mode.pass_profile => None,
             Some(i) => self.profiles.get(i),
             None => self.profile(&session.profile),
         };
@@ -275,7 +302,7 @@ impl Config {
                 ));
             }
         }
-        cmd.push_str(&self.command);
+        cmd.push_str(self.command_for(mode));
         for arg in &mode.args {
             cmd.push(' ');
             cmd.push_str(&shell_quote(arg));
@@ -405,6 +432,89 @@ mod tests {
             "cd '/home/x/my proj' && CLAUDE_CONFIG_DIR='/opt/work claude' claude \
              --dangerously-skip-permissions -r abc"
         );
+    }
+
+    fn session_in(profile: &str) -> crate::session::Session {
+        crate::session::Session {
+            id: "abc".into(),
+            project_path: "/p".into(),
+            project_name: "p".into(),
+            git_branch: None,
+            timestamp: chrono::Utc::now(),
+            first_message: String::new(),
+            last_assistant_line: String::new(),
+            cwd: "/home/x/proj".into(),
+            project_exists: true,
+            name: None,
+            profile: profile.into(),
+            file_path: PathBuf::new(),
+        }
+    }
+
+    const XCLAUDE: &str = r#"
+        [[profiles]]
+        name = "private"
+        config_dir = "/opt/private"
+
+        [[profiles]]
+        name = "work"
+        config_dir = "/opt/work"
+
+        [[modes]]
+        name = "skip permissions"
+        args = ["--dangerously-skip-permissions"]
+
+        [[modes]]
+        name = "xclaude"
+        command = "xclaude"
+        pass_profile = false
+        "#;
+
+    #[test]
+    fn mode_command_replaces_global_and_skips_profile() {
+        let mut c = parse(XCLAUDE).unwrap();
+        // An explicit profile pick doesn't reach a launcher that picks its own.
+        c.profile_override = Some(1);
+        assert_eq!(
+            c.resume_command(&session_in("work"), &c.modes[1]),
+            "cd /home/x/proj && xclaude -r abc"
+        );
+        assert_eq!(c.command_for(&c.modes[1]), "xclaude");
+        assert_eq!(c.command_for(&c.modes[0]), "claude");
+    }
+
+    #[test]
+    fn modes_without_new_keys_keep_passing_profile() {
+        let c = parse(XCLAUDE).unwrap();
+        assert!(c.modes[0].pass_profile);
+        assert_eq!(c.modes[0].command, None);
+        assert_eq!(
+            c.resume_command(&session_in("work"), &c.modes[0]),
+            "cd /home/x/proj && CLAUDE_CONFIG_DIR=/opt/work claude \
+             --dangerously-skip-permissions -r abc"
+        );
+    }
+
+    #[test]
+    fn skip_permissions_flag_never_picks_a_launcher_mode() {
+        let mut c = parse(
+            r#"
+            [[modes]]
+            name = "xclaude skip"
+            command = "xclaude"
+            args = ["--dangerously-skip-permissions"]
+            "#,
+        )
+        .unwrap();
+        c.select_mode_with_arg(SKIP_PERMISSIONS);
+        assert_eq!(c.current_mode().command, None);
+        assert_eq!(c.current_mode().args, vec![SKIP_PERMISSIONS]);
+    }
+
+    #[test]
+    fn blank_mode_command_falls_back_to_global() {
+        let c = parse("[[modes]]\nname = \"m\"\ncommand = \" \"").unwrap();
+        assert_eq!(c.command_for(c.current_mode()), "claude");
     }
 
     #[test]
