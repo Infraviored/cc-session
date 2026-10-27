@@ -692,6 +692,7 @@ pub fn run(
     app.config = config;
     let mut deferred_command: Option<String> = None;
     let mut deferred_cwd: Option<String> = None;
+    let mut print_command_on_exit: Option<String> = None;
 
     // Rescan ~/.claude/projects/ periodically so sessions being actively
     // written elsewhere (timestamps, last-message previews) stay current
@@ -737,13 +738,12 @@ pub fn run(
                         Action::EnterConversation(idx) => {
                             app.enter_conversation(idx);
                         }
-                        Action::CopyCommand(cmd) => match clipboard::copy_to_clipboard(&cmd) {
-                            Ok(()) => break,
-                            Err(_) => {
-                                deferred_command = Some(cmd);
-                                break;
+                        Action::CopyCommand(cmd) => {
+                            if let Some(cmd) = copy_fallback_command(clipboard::copy_to_clipboard(&cmd), &cmd) {
+                                print_command_on_exit = Some(cmd);
                             }
-                        },
+                            break;
+                        }
                         Action::ExecCommand { cmd, cwd } => {
                             deferred_command = Some(cmd);
                             deferred_cwd = Some(cwd);
@@ -825,6 +825,11 @@ pub fn run(
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
 
+    if let Some(cmd) = print_command_on_exit {
+        println!("{cmd}");
+        return Ok(());
+    }
+
     if let (Some(cmd), Some(cwd)) = (&deferred_command, &deferred_cwd) {
         let container = std::env::var("XCLAUDE_CONTAINER").unwrap_or_default();
         if let Some(hint) = unmounted_hint(cmd, cwd, &container, std::path::Path::new(cwd).is_dir()) {
@@ -864,6 +869,14 @@ pub fn run(
     Ok(())
 }
 
+/// Resolve clipboard copy result: on failure, fallback to printing the command on exit.
+fn copy_fallback_command(copy_result: Result<(), String>, cmd: &str) -> Option<String> {
+    match copy_result {
+        Ok(()) => None,
+        Err(_) => Some(cmd.to_string()),
+    }
+}
+
 /// Message for resuming a session whose directory isn't mounted in the
 /// xclaude container cc-session runs in: `cd` would fail there, and only the
 /// host can start a container that mounts it. `None` outside a container or
@@ -890,5 +903,14 @@ mod tests {
         let hint = unmounted_hint(cmd, "/home/u/x", "xclaude-x-1", false).unwrap();
         assert!(hint.contains("/home/u/x is not mounted"));
         assert!(hint.contains(cmd));
+    }
+
+    #[test]
+    fn copy_fallback_does_not_execute() {
+        assert_eq!(copy_fallback_command(Ok(()), "claude -r abc"), None);
+        assert_eq!(
+            copy_fallback_command(Err("no clipboard".into()), "claude -r abc"),
+            Some("claude -r abc".to_string())
+        );
     }
 }
